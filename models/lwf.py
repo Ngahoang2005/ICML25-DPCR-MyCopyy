@@ -105,14 +105,14 @@ def get_avg_fisher(fisher):
 # =====================================================================
 
 
-init_epoch = 2
+init_epoch = 200
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 2
+epochs = 100 
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -243,7 +243,7 @@ class LwF(BaseLearner):
             self._network = self._network.module
         # Sau khi train xong
         cnn_acc, _ = self.eval_task()
-        print(f"[Task {self._cur_task}] Test accuracy (top1): {cnn_acc['top1']:.2f}%")
+        print(f"[Task {self._cur_task}] Test accuracy: {cnn_acc['top1']:.2f}%")
 
 
     # def _train(self, train_loader, test_loader):
