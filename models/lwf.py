@@ -18,23 +18,21 @@ from utils.autoaugment import CIFAR10Policy
 
 # =================== Fisher Functions from BECAME ===================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=None, **kwargs):
-    # Dùng batch_size cố định để tránh lỗi key
     batch_size = 64  
 
-    fisher = {n: torch.zeros(p.shape).to(device) for n, p in model.named_parameters() if p.requires_grad}
+    # Bật grad và train mode để tính Fisher
     model.train()
-    r = np.arange(x.size(0))
-    r = torch.LongTensor(r).to(device)
+    for p in model.parameters():
+        p.requires_grad_(True)
 
+    fisher = {n: torch.zeros_like(p, device=device) for n, p in model.named_parameters() if p.requires_grad}
+
+    r = torch.arange(x.size(0), device=device)
     for i in range(0, len(r), batch_size):
-        if i + batch_size <= len(r):
-            b = r[i: i + batch_size]
-        else:
-            b = r[i:]
+        b = r[i: i + batch_size]
         data = x[b].to(device)
         target = y[b].to(device)
 
-        # Lấy output dạng dict => logits
         if "space1" in kwargs.keys():
             output_dict = model(data, space1=kwargs["space1"], space2=kwargs["space2"])
         else:
@@ -43,9 +41,8 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=Non
         if isinstance(output_dict, dict):
             output = output_dict["logits"]
         else:
-            output = output_dict  # fallback nếu model trả tensor
+            output = output_dict
 
-        # Tùy config fisher_comp
         if args.get("fisher_comp", "true") == "true":
             pred = output.argmax(1).flatten()
         elif args.get("fisher_comp") == "empirical":
@@ -54,17 +51,17 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=Non
             raise ValueError(f"Unknown fisher_comp: {args.get('fisher_comp')}")
 
         loss = F.cross_entropy(output, pred)
-        optimizer.zero_grad()
-        loss.backward()
 
-        # Cộng Fisher info
+        optimizer.zero_grad()
+        loss.backward()  # lúc này sẽ có grad vì model đang train và requires_grad=True
+
         for n, p in model.named_parameters():
             if p.grad is not None:
                 fisher[n] += p.grad.pow(2) * len(data)
 
-    # Lấy trung bình
     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
     return fisher
+
 
 def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
     up = 0
