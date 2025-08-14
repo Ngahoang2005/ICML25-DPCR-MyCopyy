@@ -62,29 +62,15 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=Non
     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
     return fisher
 
-
-# def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
-#     up = 0
-#     down = 0
-#     for n, p in model.named_parameters():
-#         if n in cur_fisher.keys() and n in old_params.keys() and n in old_fisher.keys():
-#             delta = (p - old_params[n]).pow(2)
-#             up += torch.sum(cur_fisher[n] * delta)
-#             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
-#         else:
-#             # Bỏ qua tham số mới không có trong old_params
-#             continue
-#     return up / (down + 1e-8)  # tránh chia 0
-
 def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
     up = 0
     down = 0
     for n, p in model.named_parameters():
         if (
             n in cur_fisher
-            and n in old_params
-            and n in old_fisher
-            and p.shape == old_params[n].shape
+            # and n in old_params
+            # and n in old_fisher
+            # and p.shape == old_params[n].shape
         ):
             delta = (p - old_params[n]).pow(2)
             up += torch.sum(cur_fisher[n] * delta)
@@ -105,14 +91,14 @@ def get_avg_fisher(fisher):
 # =====================================================================
 
 
-init_epoch = 200
+init_epoch = 2
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100 
+epochs = 2 
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
