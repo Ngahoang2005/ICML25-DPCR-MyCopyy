@@ -138,14 +138,14 @@ class LwF(BaseLearner):
             self.save_checkpoint("{}".format(self.args["model_dir"]))
         self.old_params = {n: p.clone() for n, p in self._network.named_parameters() if p.requires_grad}
         
-        # Chuẩn bị dữ liệu để tính Fisher
-        x_tensor = torch.tensor(self.train_loader.dataset.data)
-        y_tensor = torch.tensor(self.train_loader.dataset.targets)
+
         cur_fisher = compute_fisher_matrix_diag(
-            self.args, self._network, self._device, self._optimizer, self.train_loader.dataset.data,
-            self.train_loader.dataset.targets, self._cur_task
+            self.args, self._network, self._device, 
+            torch.optim.SGD(self._network.parameters(), lr=0.001), 
+            self.data_manager.get_all_data(), 
+            self.data_manager.get_all_targets(), 
+            self._cur_task
         )
-        
         # Lưu Fisher
         if not hasattr(self, 'fishers'):
             self.fishers = []
