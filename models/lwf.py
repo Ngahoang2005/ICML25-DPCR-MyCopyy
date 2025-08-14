@@ -138,54 +138,6 @@ class LwF(BaseLearner):
             self.save_checkpoint("{}".format(self.args["model_dir"]))
         self.old_params = {n: p.clone() for n, p in self._network.named_parameters() if p.requires_grad}
 
-        # Lấy dữ liệu từ data_manager
-        x_data = self.data_manager._train_data
-        y_data = self.data_manager._train_targets
-        
-        # Xử lý trường hợp use_path (cho ImageNet)
-        if self.data_manager.use_path:
-            # Tạo DummyDataset để áp dụng transform
-            dataset = DummyDataset(x_data, y_data, transforms.Compose(self.data_manager._train_trsf), use_path=True)
-        else:
-            # Dữ liệu là NumPy array (cho CIFAR)
-            if not isinstance(x_data, torch.Tensor):
-                x_data = torch.tensor(x_data, dtype=torch.float32).to(self._device)
-            if not isinstance(y_data, torch.Tensor):
-                y_data = torch.tensor(y_data, dtype=torch.long).to(self._device)
-            dataset = TensorDataset(x_data, y_data)
-        
-        # Tạo DataLoader để xử lý theo batch
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        
-        # Tính Fisher matrix theo batch
-        cur_fisher = compute_fisher_matrix_diag(
-            self.args, self._network, self._device, 
-            self._optimizer if hasattr(self, '_optimizer') else torch.optim.SGD(self._network.parameters(), lr=0.001), 
-            loader, self._cur_task
-        )
-        
-        # Lưu Fisher
-        if not hasattr(self, 'fishers'):
-            self.fishers = []
-        self.fishers.append(cur_fisher)
-
-        # Nếu không phải task đầu tiên thì tính λ*
-        if len(self.fishers) > 1:
-            old_fisher_sum = OrderedDict()
-            for n in self.fishers[0].keys():
-                old_fisher_sum[n] = sum(f[n] for f in self.fishers[:-1])
-
-            lambda_star = compute_fisher_merging(
-                self._network,
-                self.old_params,
-                cur_fisher,
-                old_fisher_sum
-            )
-
-            print(f"[Task {self._cur_task}] λ* = {lambda_star.item():.6f}")
-            self.lambda_star = lambda_star.item()
-        else:
-            self.lambda_star = None
 
     def incremental_train(self, data_manager):
         self.data_manager = data_manager
@@ -256,41 +208,74 @@ class LwF(BaseLearner):
     def _train(self, train_loader, test_loader):
         resume = self.args['resume']
         if self._cur_task == 0:
-            # Task 0 như cũ...
-            if resume:
-                print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
-                self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
+            print(f"[Task {self._cur_task}] Skipping backbone training (debug mode)")
             self._network.to(self._device)
             if hasattr(self._network, "module"):
                 self._network_module_ptr = self._network.module
-            if not resume:
-                optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=init_lr, weight_decay=init_weight_decay)
-                scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
-                self._init_train(train_loader, test_loader, optimizer, scheduler)
-
             self._network.eval()
-            pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
-                             total=len(train_loader),
-                             unit='batch')
+
             cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
             crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
             with torch.no_grad():
-                for i, (_, inputs, targets) in pbar:
+                for _, inputs, targets in train_loader:
                     inputs, targets = inputs.to(self._device), targets.to(self._device)
                     out_backbone = self._network(inputs)["features"]
-                    out_fe, pred = self.al_classifier(out_backbone)
+                    out_fe, _ = self.al_classifier(out_backbone)
                     label_onehot = F.one_hot(targets, self._total_classes).float()
                     cov += torch.t(out_fe) @ out_fe
-                    crs_cor += torch.t(out_fe) @ (label_onehot)
+                    crs_cor += torch.t(out_fe) @ label_onehot
+
             self.al_classifier.cov = self.al_classifier.cov + cov
             self.al_classifier.R = self.al_classifier.R + cov
             self.al_classifier.Q = self.al_classifier.Q + crs_cor
             R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
             Delta = R_inv @ self.al_classifier.Q
-
-            self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
-                    F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+            self.al_classifier.fc.weight = torch.nn.parameter.Parameter(    
+                 F.normalize(torch.t(Delta.float()), p=2, dim=-1)
+             )
             self._build_protos()
+            return  # ❌ Dừng ở đây, không train backbone task 0
+    # # Các task > 0 giữ nguyên logic cũ
+    # ...
+
+    # def _train(self, train_loader, test_loader):
+    #     resume = self.args['resume']
+    #     if self._cur_task == 0:
+    #         # Task 0 như cũ...
+    #         if resume:
+    #             print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
+    #             self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
+    #         self._network.to(self._device)
+    #         if hasattr(self._network, "module"):
+    #             self._network_module_ptr = self._network.module
+    #         if not resume:
+    #             optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=init_lr, weight_decay=init_weight_decay)
+    #             scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
+    #             self._init_train(train_loader, test_loader, optimizer, scheduler)
+
+    #         self._network.eval()
+    #         pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
+    #                          total=len(train_loader),
+    #                          unit='batch')
+    #         cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
+    #         crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
+    #         with torch.no_grad():
+    #             for i, (_, inputs, targets) in pbar:
+    #                 inputs, targets = inputs.to(self._device), targets.to(self._device)
+    #                 out_backbone = self._network(inputs)["features"]
+    #                 out_fe, pred = self.al_classifier(out_backbone)
+    #                 label_onehot = F.one_hot(targets, self._total_classes).float()
+    #                 cov += torch.t(out_fe) @ out_fe
+    #                 crs_cor += torch.t(out_fe) @ (label_onehot)
+    #         self.al_classifier.cov = self.al_classifier.cov + cov
+    #         self.al_classifier.R = self.al_classifier.R + cov
+    #         self.al_classifier.Q = self.al_classifier.Q + crs_cor
+    #         R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
+    #         Delta = R_inv @ self.al_classifier.Q
+
+    #         self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
+    #                 F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+    #         self._build_protos()
         
         else:
             resume = self.args['resume']
