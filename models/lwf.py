@@ -15,7 +15,6 @@ from utils.toolkit import target2onehot, tensor2numpy
 from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
-from fisher_utils import compute_fisher_matrix_diag, compute_fisher_merging
 # =================== Fisher Functions from BECAME ===================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
     batch_size = args.batch_size_train
