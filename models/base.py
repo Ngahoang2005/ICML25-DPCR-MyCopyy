@@ -116,6 +116,7 @@ class BaseLearner(object):
 
     def _eval_cnn(self, loader):
         self._network.eval()
+        self._network.to(self._device)  
         y_pred, y_true = [], []
 
         for _, (_, inputs, targets) in enumerate(loader):
