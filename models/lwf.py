@@ -139,11 +139,11 @@ class LwF(BaseLearner):
         self.old_params = {n: p.clone() for n, p in self._network.named_parameters() if p.requires_grad}
         
         # Chuẩn bị dữ liệu để tính Fisher
-        x_tensor = torch.tensor(self._train_loader.dataset.data)
-        y_tensor = torch.tensor(self._train_loader.dataset.targets)
+        x_tensor = torch.tensor(self.train_loader.dataset.data)
+        y_tensor = torch.tensor(self.train_loader.dataset.targets)
         cur_fisher = compute_fisher_matrix_diag(
-            self.args, self._network, self._device, self._optimizer, self._train_loader.dataset.data,
-            self._train_loader.dataset.targets, self._cur_task
+            self.args, self._network, self._device, self._optimizer, self.train_loader.dataset.data,
+            self.train_loader.dataset.targets, self._cur_task
         )
         
         # Lưu Fisher
@@ -377,7 +377,7 @@ class LwF(BaseLearner):
                 lamda_fisher = compute_fisher_merging(self._network, old_params, cur_fisher, old_fisher)
                 print(f"Lambda from Fisher: {lamda_fisher.item():.4f}")
 
-                # ===== RRCR có λ =====
+                # ===== RRCR có λ =====Analytic Learning Phase
                 self.al_classifier.cov = (1-lamda_fisher) * cov_prime + lamda_fisher * cov_new
                 self.al_classifier.Q   = (1-lamda_fisher) * Q_prime   + lamda_fisher * crs_cor_new
                 self.al_classifier.R   = (1-lamda_fisher) * R_prime   + lamda_fisher * cov_new
