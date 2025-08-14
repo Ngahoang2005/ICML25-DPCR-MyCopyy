@@ -18,7 +18,7 @@ from utils.autoaugment import CIFAR10Policy
 
 # =================== Fisher Functions from BECAME ===================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
-    batch_size = args["batch_size_train"]  # sửa sang dict
+    batch_size = 64 
     fisher = {n: torch.zeros(p.shape).to(device) for n, p in model.named_parameters() if p.requires_grad}
     model.train()
     r = np.arange(x.size(0))
