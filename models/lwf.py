@@ -241,6 +241,10 @@ class LwF(BaseLearner):
         self._train(self.train_loader, self.test_loader)
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
+        # Sau khi train xong
+        cnn_acc, _ = self.eval_task()
+        print(f"[Task {self._cur_task}] Test accuracy (top1): {cnn_acc['top1']:.2f}%")
+
 
     # def _train(self, train_loader, test_loader):
     #     resume = self.args['resume']
