@@ -17,8 +17,10 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 # =================== Fisher Functions from BECAME ===================
-def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
-    batch_size = 64 
+def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=None, **kwargs):
+    # Dùng batch_size cố định để tránh lỗi key
+    batch_size = 64  
+
     fisher = {n: torch.zeros(p.shape).to(device) for n, p in model.named_parameters() if p.requires_grad}
     model.train()
     r = np.arange(x.size(0))
@@ -26,35 +28,43 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **
 
     for i in range(0, len(r), batch_size):
         if i + batch_size <= len(r):
-            b = r[i : i + batch_size]
+            b = r[i: i + batch_size]
         else:
             b = r[i:]
         data = x[b].to(device)
         target = y[b].to(device)
 
-        if "space1" in kwargs.keys():  # TRGP
-            output = model(data, space1=kwargs["space1"], space2=kwargs["space2"])[task_id]
+        # Lấy output dạng dict => logits
+        if "space1" in kwargs.keys():
+            output_dict = model(data, space1=kwargs["space1"], space2=kwargs["space2"])
         else:
-            output = model(data)[task_id]
+            output_dict = model(data)
 
-        if args["fisher_comp"] == "true":
+        if isinstance(output_dict, dict):
+            output = output_dict["logits"]
+        else:
+            output = output_dict  # fallback nếu model trả tensor
+
+        # Tùy config fisher_comp
+        if args.get("fisher_comp", "true") == "true":
             pred = output.argmax(1).flatten()
-        elif args["fisher_comp"] == "empirical":
+        elif args.get("fisher_comp") == "empirical":
             pred = target
         else:
-            raise ValueError(f"Unknown fisher_comp: {args['fisher_comp']}")
+            raise ValueError(f"Unknown fisher_comp: {args.get('fisher_comp')}")
 
         loss = F.cross_entropy(output, pred)
         optimizer.zero_grad()
         loss.backward()
 
+        # Cộng Fisher info
         for n, p in model.named_parameters():
             if p.grad is not None:
                 fisher[n] += p.grad.pow(2) * len(data)
 
+    # Lấy trung bình
     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
     return fisher
-
 
 def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
     up = 0
