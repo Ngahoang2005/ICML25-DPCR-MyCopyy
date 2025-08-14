@@ -158,7 +158,7 @@ class LwF(BaseLearner):
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
         
         # Tính Fisher matrix theo batch
-        cur_fisher = compute_fisher_matrix_diag_in_batches(
+        cur_fisher = compute_fisher_matrix_diag(
             self.args, self._network, self._device, 
             self._optimizer if hasattr(self, '_optimizer') else torch.optim.SGD(self._network.parameters(), lr=0.001), 
             loader, self._cur_task
