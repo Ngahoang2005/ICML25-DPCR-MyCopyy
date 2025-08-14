@@ -2,6 +2,7 @@ import logging
 import numpy as np
 import torch
 import os
+from collections import OrderedDict
 from torch import nn
 from torch.serialization import load
 from tqdm import tqdm
@@ -66,6 +67,7 @@ def get_avg_fisher(fisher):
         n_params += p.numel()
     return s / n_params
 # =====================================================================
+
 init_epoch = 200
 init_lr = 0.1
 init_milestones = [60, 120, 160]
@@ -135,6 +137,7 @@ class LwF(BaseLearner):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
         self.old_params = {n: p.clone() for n, p in self._network.named_parameters() if p.requires_grad}
+        
         # Chuẩn bị dữ liệu để tính Fisher
         x_tensor = torch.tensor(self._train_loader.dataset.data)
         y_tensor = torch.tensor(self._train_loader.dataset.targets)
@@ -142,15 +145,16 @@ class LwF(BaseLearner):
             self.args, self._network, self._device, self._optimizer, self._train_loader.dataset.data,
             self._train_loader.dataset.targets, self._cur_task
         )
+        
         # Lưu Fisher
         if not hasattr(self, 'fishers'):
             self.fishers = []
         self.fishers.append(cur_fisher)
 
-         # Nếu không phải task đầu tiên thì tính λ*
+        # Nếu không phải task đầu tiên thì tính λ*
         if len(self.fishers) > 1:
             old_fisher_sum = OrderedDict()
-        # Tổng các Fisher trước đó
+            # Tổng các Fisher trước đó
             for n in self.fishers[0].keys():
                 old_fisher_sum[n] = sum(f[n] for f in self.fishers[:-1])
 
@@ -159,13 +163,12 @@ class LwF(BaseLearner):
                 self.old_params,
                 cur_fisher,
                 old_fisher_sum
-          )
+            )
 
             print(f"[Task {self._cur_task}] λ* = {lambda_star.item():.6f}")
             self.lambda_star = lambda_star.item()
         else:
             self.lambda_star = None
-        
 
     def incremental_train(self, data_manager):
         self.data_manager = data_manager
@@ -192,23 +195,22 @@ class LwF(BaseLearner):
                 transforms.ToTensor(),
                 transforms.ToPILImage()
             ]
-        self._total_classes = self._known_classes + data_manager.get_task_size(
-            self._cur_task
-        )
+        
+        self._total_classes = self._known_classes + data_manager.get_task_size(self._cur_task)
+        
         if self.args["cosine"]:
             self._network.update_fc(self._total_classes, self._cur_task)
         else:
             self._network.update_fc(self._total_classes)
 
         if self.al_classifier == None:
-            self.al_classifier = ALClassifier(512, self._total_classes, 0, self._device,args=self.args).to(self._device)
+            self.al_classifier = ALClassifier(512, self._total_classes, 0, self._device, args=self.args).to(self._device)
             for name, param in self.al_classifier.named_parameters():
                 param.requires_grad = False
         else:
             self.al_classifier.augment_class(data_manager.get_task_size(self._cur_task))
-        logging.info(
-            "Learning on {}-{}".format(self._known_classes, self._total_classes)
-        )
+        
+        logging.info("Learning on {}-{}".format(self._known_classes, self._total_classes))
 
         self.shot = None
         train_dataset = data_manager.get_dataset(
@@ -217,7 +219,7 @@ class LwF(BaseLearner):
             mode="train",
             shot=self.shot
         )
-        # self.train_dataset = train_dataset
+        
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers
         )
@@ -243,6 +245,7 @@ class LwF(BaseLearner):
             if resume:
                 print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
                 self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
+            
             self._network.to(self._device)
             if hasattr(self._network, "module"):
                 self._network_module_ptr = self._network.module
@@ -256,12 +259,13 @@ class LwF(BaseLearner):
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
                 self._update_representation(train_loader, test_loader, optimizer, scheduler)
+            
             self._build_protos()
 
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
-                self.projector = Drift_Estimator(512,False,self.args).to(self._device)
+                self.projector = Drift_Estimator(512, False, self.args).to(self._device)
                 for name, param in self.projector.named_parameters():
                     param.requires_grad = False
                 self.projector.eval()
@@ -349,14 +353,12 @@ class LwF(BaseLearner):
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1)
                 )
 
-
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
         if all_non_zeros:
             non_zeros_idx = torch.where(S > 0)[0]
             left_eign_vectors = V[:, non_zeros_idx]
-
         else:
             left_eign_vectors = V[:, :512]
         projector = left_eign_vectors @ torch.t(left_eign_vectors)
@@ -365,17 +367,20 @@ class LwF(BaseLearner):
     def _build_protos(self):
         if self.args["DPCR"]:
             for class_idx in range(self._known_classes, self._total_classes):
-                data, targets, idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx + 1),
-                                                                           source='train',
-                                                                           mode='test', shot=self.shot, ret_data=True)
+                data, targets, idx_dataset = self.data_manager.get_dataset(
+                    np.arange(class_idx, class_idx + 1),
+                    source='train',
+                    mode='test', 
+                    shot=self.shot, 
+                    ret_data=True
+                )
                 idx_loader = DataLoader(idx_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
                 vectors, _ = self._extract_vectors(idx_loader)
-                class_mean = np.mean(vectors, axis=0)  # vectors.mean(0)
-                cov = np.dot(np.transpose(vectors),vectors)
+                class_mean = np.mean(vectors, axis=0)
+                cov = np.dot(np.transpose(vectors), vectors)
                 self._protos.append(torch.tensor(class_mean).to(self._device))
                 self._covs.append(torch.tensor(cov).to(self._device))
                 self._projectors.append(self.get_projector_svd(self._covs[class_idx]))
-
 
     def _init_train(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(init_epoch))
@@ -423,7 +428,6 @@ class LwF(BaseLearner):
         logging.info(info)
 
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
-
         prog_bar = tqdm(range(epochs))
         for _, epoch in enumerate(prog_bar):
             self._network.train()
@@ -482,4 +486,3 @@ def _KD_loss(pred, soft, T):
     pred = torch.log_softmax(pred / T, dim=1)
     soft = torch.softmax(soft / T, dim=1)
     return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
-
