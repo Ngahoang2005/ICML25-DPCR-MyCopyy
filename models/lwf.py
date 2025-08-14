@@ -18,11 +18,12 @@ from utils.autoaugment import CIFAR10Policy
 
 # =================== Fisher Functions from BECAME ===================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
-    batch_size = args.batch_size_train
+    batch_size = args["batch_size_train"]  # sửa sang dict
     fisher = {n: torch.zeros(p.shape).to(device) for n, p in model.named_parameters() if p.requires_grad}
     model.train()
     r = np.arange(x.size(0))
     r = torch.LongTensor(r).to(device)
+
     for i in range(0, len(r), batch_size):
         if i + batch_size <= len(r):
             b = r[i : i + batch_size]
@@ -30,24 +31,30 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **
             b = r[i:]
         data = x[b].to(device)
         target = y[b].to(device)
-        if "space1" in kwargs.keys():
+
+        if "space1" in kwargs.keys():  # TRGP
             output = model(data, space1=kwargs["space1"], space2=kwargs["space2"])[task_id]
         else:
             output = model(data)[task_id]
-        if args.fisher_comp == "true":
+
+        if args["fisher_comp"] == "true":
             pred = output.argmax(1).flatten()
-        elif args.fisher_comp == "empirical":
+        elif args["fisher_comp"] == "empirical":
             pred = target
         else:
-            raise ValueError(f"Unknown fisher_comp: {args.fisher_comp}")
+            raise ValueError(f"Unknown fisher_comp: {args['fisher_comp']}")
+
         loss = F.cross_entropy(output, pred)
         optimizer.zero_grad()
         loss.backward()
+
         for n, p in model.named_parameters():
             if p.grad is not None:
                 fisher[n] += p.grad.pow(2) * len(data)
+
     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
     return fisher
+
 
 def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
     up = 0
@@ -59,14 +66,16 @@ def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
     return up / down
 
+
 def get_avg_fisher(fisher):
     s = 0
     n_params = 0
-    for n, p in fisher.items():
+    for _, p in fisher.items():
         s += torch.sum(p).item()
         n_params += p.numel()
     return s / n_params
 # =====================================================================
+
 
 init_epoch = 200
 init_lr = 0.1
