@@ -83,36 +83,6 @@ num_workers = 8
 T = 2
 lamda = 10
 
-# Tiny-ImageNet200
-# epochs = 100
-# lrate = 0.001
-# milestones = [45, 90]
-# lrate_decay = 0.1
-# batch_size = 128
-# weight_decay = 2e-4
-# num_workers = 8
-# T = 2
-# lamda = 10
-
-# imagenet100
-# epochs = 100
-# lrate = 0.05
-# milestones = [45, 90]
-# lrate_decay = 0.1
-# batch_size = 128
-# weight_decay = 2e-4
-# num_workers = 8
-# T = 2
-# lamda = 5
-
-
-# fine-grained dataset
-# init_lr = 0.01
-# lrate = 0.005
-# lamda = 20
-
-# refer to supplementary materials for other dataset training settings
-
 EPSILON = 1e-8
 
 class LwF(BaseLearner):
@@ -164,6 +134,37 @@ class LwF(BaseLearner):
             if not os.path.exists(self.args["model_dir"]):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
+        self.old_params = {n: p.clone() for n, p in self._network.named_parameters() if p.requires_grad}
+        # Chuẩn bị dữ liệu để tính Fisher
+        x_tensor = torch.tensor(self._train_loader.dataset.data)
+        y_tensor = torch.tensor(self._train_loader.dataset.targets)
+        cur_fisher = compute_fisher_matrix_diag(
+            self.args, self._network, self._device, self._optimizer, self._train_loader.dataset.data,
+            self._train_loader.dataset.targets, self._cur_task
+        )
+        # Lưu Fisher
+        if not hasattr(self, 'fishers'):
+            self.fishers = []
+        self.fishers.append(cur_fisher)
+
+         # Nếu không phải task đầu tiên thì tính λ*
+        if len(self.fishers) > 1:
+            old_fisher_sum = OrderedDict()
+        # Tổng các Fisher trước đó
+            for n in self.fishers[0].keys():
+                old_fisher_sum[n] = sum(f[n] for f in self.fishers[:-1])
+
+            lambda_star = compute_fisher_merging(
+                self._network,
+                self.old_params,
+                cur_fisher,
+                old_fisher_sum
+          )
+
+            print(f"[Task {self._cur_task}] λ* = {lambda_star.item():.6f}")
+            self.lambda_star = lambda_star.item()
+        else:
+            self.lambda_star = None
         
 
     def incremental_train(self, data_manager):
@@ -234,117 +235,146 @@ class LwF(BaseLearner):
             self._network = self._network.module
 
     def _train(self, train_loader, test_loader):
-        resume = self.args['resume']  # set resume=True to use saved checkpoints
-        if self._cur_task == 0:
-            if resume:
-                print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
-                self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
-            self._network.to(self._device)
-            if hasattr(self._network, "module"):
-                self._network_module_ptr = self._network.module
-            if not resume:
-                optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=init_lr, weight_decay=init_weight_decay)
-                scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
-                self._init_train(train_loader, test_loader, optimizer, scheduler)
+    resume = self.args['resume']  # set resume=True to use saved checkpoints
+    
+    # =======================
+    # TASK 0
+    # =======================
+    if self._cur_task == 0:
+        if resume:
+            print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
+            self._network.load_state_dict(
+                torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"],
+                strict=False
+            )
+        self._network.to(self._device)
+        if hasattr(self._network, "module"):
+            self._network_module_ptr = self._network.module
+        if not resume:
+            optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=init_lr, weight_decay=init_weight_decay)
+            scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
+            self._init_train(train_loader, test_loader, optimizer, scheduler)
 
+        self._network.eval()
+        pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
+                         total=len(train_loader),
+                         unit='batch')
+        cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
+        crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
+        with torch.no_grad():
+            for i, (_, inputs, targets) in pbar:
+                inputs, targets = inputs.to(self._device), targets.to(self._device)
+                out_backbone = self._network(inputs)["features"]
+                out_fe, pred = self.al_classifier(out_backbone)
+                label_onehot = F.one_hot(targets, self._total_classes).float()
+                cov += torch.t(out_fe) @ out_fe
+                crs_cor += torch.t(out_fe) @ (label_onehot)
+        self.al_classifier.cov = self.al_classifier.cov + cov
+        self.al_classifier.R = self.al_classifier.R + cov
+        self.al_classifier.Q = self.al_classifier.Q + crs_cor
+
+        R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
+        Delta = R_inv @ self.al_classifier.Q
+
+        # --- Áp dụng beta (lambda_star) ---
+        beta = self.lambda_star if getattr(self, 'lambda_star', None) is not None else 1.0
+        Delta = beta * Delta
+
+        self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
+                F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+        self._build_protos()
+
+    # =======================
+    # TASK > 0
+    # =======================
+    else:
+        if resume:
+            print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
+            self._network.load_state_dict(
+                torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"],
+                strict=False
+            )
+        self._network.to(self._device)
+        if hasattr(self._network, "module"):
+            self._network_module_ptr = self._network.module
+        if self._old_network is not None:
+            self._old_network.to(self._device)
+        if not resume:
+            optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
+            scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
+            self._update_representation(train_loader, test_loader, optimizer, scheduler)
+        self._build_protos()                
+
+        # =======================
+        # DPCR
+        # =======================
+        if self.args["DPCR"]:
+            print('Using DPCR')
             self._network.eval()
-            pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
-                             total=len(train_loader),
-                             unit='batch')
-            cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
-            crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
+            self.projector = Drift_Estimator(512, False, self.args)
+            self.projector.to(self._device)
+            for name, param in self.projector.named_parameters():
+                param.requires_grad = False
+            self.projector.eval()
+
+            cov_pwdr = self.projector.rg_tssp * torch.eye(self.projector.fe_size).to(self._device)
+            crs_cor_pwdr = torch.zeros(self.projector.fe_size, self.projector.fe_size).to(self._device)
+
+            crs_cor_new = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
+            cov_new = torch.zeros(self.projector.fe_size, self.projector.fe_size).to(self._device)
+
             with torch.no_grad():
-                for i, (_, inputs, targets) in pbar:
+                for i, (_, inputs, targets) in enumerate(train_loader):
                     inputs, targets = inputs.to(self._device), targets.to(self._device)
-                    out_backbone = self._network(inputs)["features"]
-                    out_fe, pred = self.al_classifier(out_backbone)
+                    feats_old = self._old_network(inputs)["features"]
+                    feats_new = self._network(inputs)["features"]
+                    cov_pwdr += torch.t(feats_old) @ feats_old
+                    cov_new += torch.t(feats_new) @ feats_new
+                    crs_cor_pwdr += torch.t(feats_old) @ (feats_new)
                     label_onehot = F.one_hot(targets, self._total_classes).float()
-                    cov += torch.t(out_fe) @ out_fe
-                    crs_cor += torch.t(out_fe) @ (label_onehot)
-            self.al_classifier.cov = self.al_classifier.cov + cov
-            self.al_classifier.R = self.al_classifier.R + cov
-            self.al_classifier.Q = self.al_classifier.Q + crs_cor
+                    crs_cor_new += torch.t(feats_new) @ (label_onehot)
+
+            self.projector.cov = cov_pwdr
+            self.projector.Q = crs_cor_pwdr
+            R_inv = torch.inverse(cov_pwdr.cpu()).to(self._device)
+            Delta = R_inv @ crs_cor_pwdr
+
+            # --- Áp dụng beta ---
+            beta = self.lambda_star if getattr(self, 'lambda_star', None) is not None else 1.0
+            Delta = beta * Delta
+
+            self.projector.fc.weight = torch.nn.parameter.Parameter(torch.t(Delta.float()))
+
+            cov_prime = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
+            Q_prime = torch.zeros(self.al_classifier.fe_size, self.al_classifier.num_classes).to(self._device)
+
+            for class_idx in range(0, self._known_classes):
+                W = self.projector.get_weight() @ self._projectors[class_idx]
+                cov_idx = self._covs[class_idx]
+                cov_prime_idx = torch.t(W) @ cov_idx @ W
+                label = class_idx
+                label_onehot = F.one_hot(torch.tensor(label).long().to(self._device), self._total_classes).float()
+                cor_prime_idx = self.num_per_class * (torch.t(W) @ torch.t(
+                    self._protos[class_idx].view(1, self.al_classifier.fe_size))) @ label_onehot.view(1, self._total_classes)
+                cov_prime += cov_prime_idx
+                Q_prime += cor_prime_idx
+                self._covs[class_idx] = cov_prime_idx
+                self._projectors[class_idx] = self.get_projector_svd(cov_prime_idx)
+                self._protos[class_idx] = self._protos[class_idx] @ W
+
+            R_prime = cov_prime + self.al_classifier.gamma * torch.eye(self.al_classifier.fe_size).to(self._device)
+            self.al_classifier.cov = cov_prime + cov_new
+            self.al_classifier.Q = Q_prime + crs_cor_new
+            self.al_classifier.R = R_prime + cov_new
             R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
             Delta = R_inv @ self.al_classifier.Q
 
+            # --- Áp dụng beta ---
+            beta = self.lambda_star if getattr(self, 'lambda_star', None) is not None else 1.0
+            Delta = beta * Delta
+
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
-            self._build_protos()
-        else:
-            resume = self.args['resume']
-            if resume:
-                print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
-                self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
-            self._network.to(self._device)
-            if hasattr(self._network, "module"):
-                self._network_module_ptr = self._network.module
-            if self._old_network is not None:
-                self._old_network.to(self._device)
-            if not resume:
-                optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
-                scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
-                self._update_representation(train_loader, test_loader, optimizer, scheduler)
-            self._build_protos()                
-                    
-                    
-            if self.args["DPCR"]:
-                print('Using DPCR')
-                self._network.eval()
-                self.projector = Drift_Estimator(512,False,self.args)
-                self.projector.to(self._device)
-                for name, param in self.projector.named_parameters():
-                    param.requires_grad = False
-                self.projector.eval()
-                cov_pwdr = self.projector.rg_tssp * torch.eye(self.projector.fe_size).to(self._device)
-                crs_cor_pwdr = torch.zeros(self.projector.fe_size, self.projector.fe_size).to(self._device)
-
-                crs_cor_new = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
-                cov_new = torch.zeros(self.projector.fe_size, self.projector.fe_size).to(self._device)
-                with torch.no_grad():
-                    for i, (_, inputs, targets) in enumerate(train_loader):
-                        inputs, targets = inputs.to(self._device), targets.to(self._device)
-                        feats_old = self._old_network(inputs)["features"]
-                        # print(feats_old)
-                        feats_new = self._network(inputs)["features"]
-                        cov_pwdr += torch.t(feats_old) @ feats_old
-                        cov_new += torch.t(feats_new) @ feats_new
-                        crs_cor_pwdr += torch.t(feats_old) @ (feats_new)
-                        label_onehot = F.one_hot(targets, self._total_classes).float()
-                        crs_cor_new += torch.t(feats_new) @ (label_onehot)
-                self.projector.cov = cov_pwdr
-                self.projector.Q = crs_cor_pwdr
-                R_inv = torch.inverse(cov_pwdr.cpu()).to(self._device)
-                Delta = R_inv @ crs_cor_pwdr
-                self.projector.fc.weight = torch.nn.parameter.Parameter(torch.t(Delta.float()))
-
-                cov_prime = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
-                Q_prime = torch.zeros(self.al_classifier.fe_size, self.al_classifier.num_classes).to(self._device)
-
-                for class_idx in range(0, self._known_classes):
-                    W = self.projector.get_weight() @ self._projectors[class_idx]
-                    cov_idx = self._covs[class_idx]
-                    cov_prime_idx = torch.t(W) @ cov_idx @ W
-                    label = class_idx
-                    label_onehot = F.one_hot(torch.tensor(label).long().to(self._device), self._total_classes).float()
-                    cor_prime_idx = self.num_per_class * (torch.t(W) @ torch.t(
-                        self._protos[class_idx].view(1, self.al_classifier.fe_size))) @ label_onehot.view(1, self._total_classes)
-                    cov_prime += cov_prime_idx
-                    Q_prime += cor_prime_idx
-                    self._covs[class_idx] = cov_prime_idx
-                    self._projectors[class_idx] = self.get_projector_svd(cov_prime_idx)
-                    self._protos[class_idx] = self._protos[class_idx] @ W
-
-                R_prime = cov_prime + self.al_classifier.gamma * torch.eye(self.al_classifier.fe_size).to(self._device)
-                self.al_classifier.cov = cov_prime + cov_new
-                self.al_classifier.Q = Q_prime + crs_cor_new
-                self.al_classifier.R = R_prime+ cov_new
-                R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
-                Delta = R_inv @ self.al_classifier.Q
-                self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
-                        F.normalize(torch.t(Delta.float()), p=2, dim=-1))
-
-
-
 
 
     # SVD for calculating the W_c
