@@ -240,8 +240,43 @@ class LwF(BaseLearner):
         resume = self.args['resume']
         if self._cur_task == 0:
             # Task 0 như cũ...
-            pass
+            if resume:
+                print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
+                self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
+            self._network.to(self._device)
+            if hasattr(self._network, "module"):
+                self._network_module_ptr = self._network.module
+            if not resume:
+                optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=init_lr, weight_decay=init_weight_decay)
+                scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
+                self._init_train(train_loader, test_loader, optimizer, scheduler)
+
+            self._network.eval()
+            pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
+                             total=len(train_loader),
+                             unit='batch')
+            cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
+            crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
+            with torch.no_grad():
+                for i, (_, inputs, targets) in pbar:
+                    inputs, targets = inputs.to(self._device), targets.to(self._device)
+                    out_backbone = self._network(inputs)["features"]
+                    out_fe, pred = self.al_classifier(out_backbone)
+                    label_onehot = F.one_hot(targets, self._total_classes).float()
+                    cov += torch.t(out_fe) @ out_fe
+                    crs_cor += torch.t(out_fe) @ (label_onehot)
+            self.al_classifier.cov = self.al_classifier.cov + cov
+            self.al_classifier.R = self.al_classifier.R + cov
+            self.al_classifier.Q = self.al_classifier.Q + crs_cor
+            R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
+            Delta = R_inv @ self.al_classifier.Q
+
+            self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
+                    F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+            self._build_protos()
+        
         else:
+            resume = self.args['resume']
             if resume:
                 print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
                 self._network.load_state_dict(torch.load("{}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))["state_dict"], strict=False)
