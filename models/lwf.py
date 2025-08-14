@@ -67,11 +67,15 @@ def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
     up = 0
     down = 0
     for n, p in model.named_parameters():
-        if n in cur_fisher.keys():
+        if n in cur_fisher.keys() and n in old_params.keys() and n in old_fisher.keys():
             delta = (p - old_params[n]).pow(2)
             up += torch.sum(cur_fisher[n] * delta)
             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
-    return up / down
+        else:
+            # Bỏ qua tham số mới không có trong old_params
+            continue
+    return up / (down + 1e-8)  # tránh chia 0
+
 
 
 def get_avg_fisher(fisher):
