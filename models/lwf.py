@@ -137,15 +137,33 @@ class LwF(BaseLearner):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
         self.old_params = {n: p.clone() for n, p in self._network.named_parameters() if p.requires_grad}
-        
 
-        cur_fisher = compute_fisher_matrix_diag(
+        # Lấy dữ liệu từ data_manager
+        x_data = self.data_manager._train_data
+        y_data = self.data_manager._train_targets
+        
+        # Xử lý trường hợp use_path (cho ImageNet)
+        if self.data_manager.use_path:
+            # Tạo DummyDataset để áp dụng transform
+            dataset = DummyDataset(x_data, y_data, transforms.Compose(self.data_manager._train_trsf), use_path=True)
+        else:
+            # Dữ liệu là NumPy array (cho CIFAR)
+            if not isinstance(x_data, torch.Tensor):
+                x_data = torch.tensor(x_data, dtype=torch.float32).to(self._device)
+            if not isinstance(y_data, torch.Tensor):
+                y_data = torch.tensor(y_data, dtype=torch.long).to(self._device)
+            dataset = TensorDataset(x_data, y_data)
+        
+        # Tạo DataLoader để xử lý theo batch
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        
+        # Tính Fisher matrix theo batch
+        cur_fisher = compute_fisher_matrix_diag_in_batches(
             self.args, self._network, self._device, 
-            torch.optim.SGD(self._network.parameters(), lr=0.001), 
-            self.data_manager.get_all_data(), 
-            self.data_manager.get_all_targets(), 
-            self._cur_task
+            self._optimizer if hasattr(self, '_optimizer') else torch.optim.SGD(self._network.parameters(), lr=0.001), 
+            loader, self._cur_task
         )
+        
         # Lưu Fisher
         if not hasattr(self, 'fishers'):
             self.fishers = []
@@ -154,7 +172,6 @@ class LwF(BaseLearner):
         # Nếu không phải task đầu tiên thì tính λ*
         if len(self.fishers) > 1:
             old_fisher_sum = OrderedDict()
-            # Tổng các Fisher trước đó
             for n in self.fishers[0].keys():
                 old_fisher_sum[n] = sum(f[n] for f in self.fishers[:-1])
 
