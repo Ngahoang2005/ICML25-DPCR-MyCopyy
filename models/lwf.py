@@ -63,19 +63,30 @@ from utils.autoaugment import CIFAR10Policy
 #     return fisher
 
 def compute_fisher_matrix_diag(model, dataloader, device, num_samples=None):
-    model.train()  # phải train để bật gradient
-    fisher = {n: torch.zeros_like(p, device=device) for n, p in model.named_parameters() if p.requires_grad}
+    """
+    Compute diagonal Fisher Information Matrix
+    """
+    # đảm bảo model cho phép grad
+    model.train()
+    for p in model.parameters():
+        p.requires_grad_(True)
+
+    fisher = {n: torch.zeros_like(p, device=device) 
+              for n, p in model.named_parameters() if p.requires_grad}
     count = 0
 
     for i, (_, inputs, targets) in enumerate(dataloader):
         inputs, targets = inputs.to(device), targets.to(device)
 
-        # forward
-        outputs = model(inputs)["logits"]   # vẫn có grad_fn
+        # forward (KHÔNG dùng torch.no_grad())
+        outputs = model(inputs)["logits"]
+        # đảm bảo outputs cần grad
+        if not outputs.requires_grad:
+            outputs.requires_grad_(True)
+
         log_likelihood = F.log_softmax(outputs, dim=1)
         loss = F.nll_loss(log_likelihood, targets)
 
-        # backward
         model.zero_grad()
         loss.backward()
 
@@ -90,7 +101,7 @@ def compute_fisher_matrix_diag(model, dataloader, device, num_samples=None):
 
     # average
     for n in fisher.keys():
-        fisher[n] = fisher[n] / count
+        fisher[n] /= max(count, 1)
 
     return fisher
 
