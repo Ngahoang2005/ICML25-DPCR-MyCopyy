@@ -472,10 +472,12 @@ class LwF(BaseLearner):
                 y_new = torch.cat(y_new).to(self._device)
 
                 optimizer_dummy = torch.optim.SGD(self._network.parameters(), lr=0.001)
-                old_fisher = compute_fisher_matrix_diag(self.args, self._old_network, self._device, optimizer_dummy, x_old, y_old)
-                cur_fisher = compute_fisher_matrix_diag(self.args, self._network, self._device, optimizer_dummy, x_new, y_new)
-                lamda_fisher = compute_fisher_merging(self._network, old_params, cur_fisher, old_fisher)
-                print(f"Lambda from Fisher: {lamda_fisher.item():.4f}")
+                old_fisher = compute_fisher_matrix_diag(self._old_network, old_loader, self._device, num_samples=200)
+                cur_fisher = compute_fisher_matrix_diag(self._network, new_loader, self._device, num_samples=200)
+
+# Tính λ theo công thức merging
+                lamda_fisher = compute_fisher_merging(cur_fisher, old_fisher, self._network, old_params, self._device)
+                print(f"Lambda from Fisher: {lamda_fisher:.4f}")
 
                 # ===== RRCR có λ =====Analytic Learning Phase
                 self.al_classifier.cov = (1-lamda_fisher) * cov_prime + lamda_fisher * cov_new
