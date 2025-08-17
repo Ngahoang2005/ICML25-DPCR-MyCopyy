@@ -144,16 +144,15 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=Non
 #     return up / (down + 1e-8)  # tránh chia 0
 
 def compute_fisher_merging(cur_fisher, old_fisher, model, old_params, device):
-    """
-    Compute Fisher merging score giữa current và old Fisher.
-    """
     up, down = 0.0, 0.0
 
     for n, p in model.named_parameters():
         if not p.requires_grad:
             continue
         if n not in cur_fisher or n not in old_fisher or n not in old_params:
-            # bỏ qua param không tồn tại ở cả hai fisher
+            continue
+        if p.shape != old_params[n].shape:
+            # skip nếu shape khác (vd. classifier mở rộng thêm class)
             continue
 
         cur_f = cur_fisher[n]
@@ -165,7 +164,6 @@ def compute_fisher_merging(cur_fisher, old_fisher, model, old_params, device):
 
     if down < 1e-12:
         return 0.0
-
     return up / down
 
 
