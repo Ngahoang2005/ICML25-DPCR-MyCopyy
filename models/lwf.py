@@ -63,17 +63,7 @@ from utils.autoaugment import CIFAR10Policy
 #     return fisher
 
 def compute_fisher_matrix_diag(model, dataloader, device, num_samples=None):
-    """
-    Compute diagonal Fisher Information Matrix for given model and data.
-    Args:
-        model: nn.Module
-        dataloader: torch.utils.data.DataLoader (dữ liệu để tính Fisher)
-        device: torch.device
-        num_samples: số lượng mẫu tối đa dùng (nếu None thì dùng toàn bộ dataloader)
-    Returns:
-        fisher: dict với key là tên tham số, value là tensor Fisher diag
-    """
-    model.eval()
+    model.train()  # phải train để bật gradient
     fisher = {n: torch.zeros_like(p, device=device) for n, p in model.named_parameters() if p.requires_grad}
     count = 0
 
@@ -81,9 +71,8 @@ def compute_fisher_matrix_diag(model, dataloader, device, num_samples=None):
         inputs, targets = inputs.to(device), targets.to(device)
 
         # forward
-        outputs = model(inputs)["logits"]
+        outputs = model(inputs)["logits"]   # vẫn có grad_fn
         log_likelihood = F.log_softmax(outputs, dim=1)
-        # sample loss
         loss = F.nll_loss(log_likelihood, targets)
 
         # backward
