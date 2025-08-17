@@ -62,47 +62,66 @@ from utils.autoaugment import CIFAR10Policy
 #     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
 #     return fisher
 
-def compute_fisher_matrix_diag(model, dataloader, device, num_samples=None):
+import torch
+import torch.nn.functional as F
+
+def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=None, **kwargs):
     """
-    Compute diagonal Fisher Information Matrix
+    Tính Fisher Information diag cho model trong DPCR.
+    Args:
+        args: dict tham số
+        model: nn.Module
+        device: torch.device
+        optimizer: torch.optim (dummy, chỉ để zero_grad)
+        x: tensor input [N, C, H, W]
+        y: tensor target [N]
+        task_id: id của task (không bắt buộc)
+    Returns:
+        fisher: dict {param_name: tensor Fisher diag}
     """
-    # đảm bảo model cho phép grad
+    batch_size = args.get("batch_size_train", 64)
+
+    # bật train mode và requires_grad
     model.train()
     for p in model.parameters():
         p.requires_grad_(True)
 
     fisher = {n: torch.zeros_like(p, device=device) 
               for n, p in model.named_parameters() if p.requires_grad}
-    count = 0
 
-    for i, (_, inputs, targets) in enumerate(dataloader):
-        inputs, targets = inputs.to(device), targets.to(device)
+    r = torch.arange(x.size(0), device=device)
+    for i in range(0, len(r), batch_size):
+        b = r[i: i + batch_size]
+        data = x[b].to(device)
+        target = y[b].to(device)
 
-        # forward (KHÔNG dùng torch.no_grad())
-        outputs = model(inputs)["logits"]
-        # đảm bảo outputs cần grad
-        if not outputs.requires_grad:
-            outputs.requires_grad_(True)
+        # forward theo đúng kiểu DPCR (trả về dict)
+        output_dict = model(data)
+        if isinstance(output_dict, dict):
+            output = output_dict["logits"]
+        else:
+            output = output_dict
 
-        log_likelihood = F.log_softmax(outputs, dim=1)
-        loss = F.nll_loss(log_likelihood, targets)
+        # chọn nhãn theo cấu hình fisher_comp
+        fisher_comp = args.get("fisher_comp", "true")
+        if fisher_comp == "true":
+            pred = output.argmax(1).flatten()   # theo dự đoán
+        elif fisher_comp == "empirical":
+            pred = target                       # theo ground-truth
+        else:
+            raise ValueError(f"Unknown fisher_comp: {fisher_comp}")
 
-        model.zero_grad()
+        loss = F.cross_entropy(output, pred)
+
+        optimizer.zero_grad()
         loss.backward()
 
-        # accumulate squared gradients
+        # accumulate Fisher diag
         for n, p in model.named_parameters():
             if p.grad is not None:
-                fisher[n] += p.grad.detach() ** 2
+                fisher[n] += p.grad.detach().pow(2) * len(data)
 
-        count += 1
-        if num_samples is not None and count >= num_samples:
-            break
-
-    # average
-    for n in fisher.keys():
-        fisher[n] /= max(count, 1)
-
+    fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
     return fisher
 
 
