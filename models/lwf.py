@@ -145,31 +145,29 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=Non
 
 def compute_fisher_merging(cur_fisher, old_fisher, model, old_params, device):
     """
-    Compute Fisher merging score between current and old Fisher.
-    Args:
-        cur_fisher: dict {param_name: tensor} - Fisher của task hiện tại
-        old_fisher: dict {param_name: tensor} - Fisher của task cũ
-        model: nn.Module (model hiện tại)
-        old_params: dict {param_name: tensor} - tham số model sau task cũ (để so sánh delta)
-        device: torch.device
-    Returns:
-        merging_score: float (up/down)
+    Compute Fisher merging score giữa current và old Fisher.
     """
     up, down = 0.0, 0.0
 
     for n, p in model.named_parameters():
-        if p.requires_grad:
-            cur_f = cur_fisher[n]
-            old_f = old_fisher[n]
-            delta = (p.detach() - old_params[n].to(device)) ** 2
+        if not p.requires_grad:
+            continue
+        if n not in cur_fisher or n not in old_fisher or n not in old_params:
+            # bỏ qua param không tồn tại ở cả hai fisher
+            continue
 
-            up += torch.sum(cur_f * delta).item()
-            down += torch.sum((cur_f + old_f) * delta).item()
+        cur_f = cur_fisher[n]
+        old_f = old_fisher[n]
+        delta = (p.detach() - old_params[n].to(device)) ** 2
 
-    if down < 1e-12:  # tránh chia cho 0
+        up += torch.sum(cur_f * delta).item()
+        down += torch.sum((cur_f + old_f) * delta).item()
+
+    if down < 1e-12:
         return 0.0
 
     return up / down
+
 
 def get_avg_fisher(fisher):
     s = 0
