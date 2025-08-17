@@ -472,8 +472,8 @@ class LwF(BaseLearner):
                 y_new = torch.cat(y_new).to(self._device)
 
                 optimizer_dummy = torch.optim.SGD(self._network.parameters(), lr=0.001)
-                old_fisher = compute_fisher_matrix_diag(self.args, self._old_network, self._device, optimizer_dummy, x_old, y_old, task_id=self._cur_task-1)
-                cur_fisher = compute_fisher_matrix_diag(self.args, self._network, self._device, optimizer_dummy, x_new, y_new, task_id=self._cur_task)
+                old_fisher = compute_fisher_matrix_diag(self.args, self._old_network, self._device, optimizer_dummy, x_old, y_old)
+                cur_fisher = compute_fisher_matrix_diag(self.args, self._network, self._device, optimizer_dummy, x_new, y_new)
                 lamda_fisher = compute_fisher_merging(self._network, old_params, cur_fisher, old_fisher)
                 print(f"Lambda from Fisher: {lamda_fisher.item():.4f}")
 
