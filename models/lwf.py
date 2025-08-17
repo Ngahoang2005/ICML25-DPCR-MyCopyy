@@ -491,8 +491,9 @@ class LwF(BaseLearner):
                 y_new = torch.cat(y_new).to(self._device)
 
                 optimizer_dummy = torch.optim.SGD(self._network.parameters(), lr=0.001)
-                old_fisher = compute_fisher_matrix_diag(self._old_network, old_loader, self._device, num_samples=200)
-                cur_fisher = compute_fisher_matrix_diag(self._network, new_loader, self._device, num_samples=200)
+                old_fisher = compute_fisher_matrix_diag(self.args, self._old_network, self._device, optimizer_dummy, x_old, y_old)
+                cur_fisher = compute_fisher_matrix_diag(self.args, self._network, self._device, optimizer_dummy, x_new, y_new)
+
 
 # Tính λ theo công thức merging
                 lamda_fisher = compute_fisher_merging(cur_fisher, old_fisher, self._network, old_params, self._device)
