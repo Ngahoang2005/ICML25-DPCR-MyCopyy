@@ -16,16 +16,32 @@ from utils.toolkit import target2onehot, tensor2numpy
 from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
-# =================== Fisher Functions from BECAME ===================
-# def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=None, **kwargs):
-#     batch_size = 64  
+import torch
+import torch.nn.functional as F
 
-#     # Bật grad và train mode để tính Fisher
+# def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=None, **kwargs):
+#     """
+#     Tính Fisher Information diag cho model trong DPCR.
+#     Args:
+#         args: dict tham số
+#         model: nn.Module
+#         device: torch.device
+#         optimizer: torch.optim (dummy, chỉ để zero_grad)
+#         x: tensor input [N, C, H, W]
+#         y: tensor target [N]
+#         task_id: id của task (không bắt buộc)
+#     Returns:
+#         fisher: dict {param_name: tensor Fisher diag}
+#     """
+#     batch_size = args.get("batch_size_train", 64)
+
+#     # bật train mode và requires_grad
 #     model.train()
 #     for p in model.parameters():
 #         p.requires_grad_(True)
 
-#     fisher = {n: torch.zeros_like(p, device=device) for n, p in model.named_parameters() if p.requires_grad}
+#     fisher = {n: torch.zeros_like(p, device=device) 
+#               for n, p in model.named_parameters() if p.requires_grad}
 
 #     r = torch.arange(x.size(0), device=device)
 #     for i in range(0, len(r), batch_size):
@@ -33,139 +49,125 @@ from utils.autoaugment import CIFAR10Policy
 #         data = x[b].to(device)
 #         target = y[b].to(device)
 
-#         if "space1" in kwargs.keys():
-#             output_dict = model(data, space1=kwargs["space1"], space2=kwargs["space2"])
-#         else:
-#             output_dict = model(data)
-
+#         # forward theo đúng kiểu DPCR (trả về dict)
+#         output_dict = model(data)
 #         if isinstance(output_dict, dict):
 #             output = output_dict["logits"]
 #         else:
 #             output = output_dict
 
-#         if args.get("fisher_comp", "true") == "true":
-#             pred = output.argmax(1).flatten()
-#         elif args.get("fisher_comp") == "empirical":
-#             pred = target
+#         # chọn nhãn theo cấu hình fisher_comp
+#         fisher_comp = args.get("fisher_comp", "true")
+#         if fisher_comp == "true":
+#             pred = output.argmax(1).flatten()   # theo dự đoán
+#         elif fisher_comp == "empirical":
+#             pred = target                       # theo ground-truth
 #         else:
-#             raise ValueError(f"Unknown fisher_comp: {args.get('fisher_comp')}")
+#             raise ValueError(f"Unknown fisher_comp: {fisher_comp}")
 
 #         loss = F.cross_entropy(output, pred)
 
 #         optimizer.zero_grad()
-#         loss.backward()  # lúc này sẽ có grad vì model đang train và requires_grad=True
+#         loss.backward()
 
+#         # accumulate Fisher diag
 #         for n, p in model.named_parameters():
 #             if p.grad is not None:
-#                 fisher[n] += p.grad.pow(2) * len(data)
+#                 fisher[n] += p.grad.detach().pow(2) * len(data)
 
 #     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
 #     return fisher
 
+# def compute_fisher_merging(cur_fisher, old_fisher, model, old_params, device):
+#     up, down = 0.0, 0.0
+
+#     for n, p in model.named_parameters():
+#         if not p.requires_grad:
+#             continue
+#         if n not in cur_fisher or n not in old_fisher or n not in old_params:
+#             continue
+#         if p.shape != old_params[n].shape:
+#             # skip nếu shape khác (vd. classifier mở rộng thêm class)
+#             continue
+
+#         cur_f = cur_fisher[n]
+#         old_f = old_fisher[n]
+#         delta = (p.detach() - old_params[n].to(device)) ** 2
+
+#         up += torch.sum(cur_f * delta).item()
+#         down += torch.sum((cur_f + old_f) * delta).item()
+
+#     if down < 1e-12:
+#         return 0.0
+#     return up / down
+
 import torch
 import torch.nn.functional as F
+import numpy as np
 
-def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id=None, **kwargs):
-    """
-    Tính Fisher Information diag cho model trong DPCR.
-    Args:
-        args: dict tham số
-        model: nn.Module
-        device: torch.device
-        optimizer: torch.optim (dummy, chỉ để zero_grad)
-        x: tensor input [N, C, H, W]
-        y: tensor target [N]
-        task_id: id của task (không bắt buộc)
-    Returns:
-        fisher: dict {param_name: tensor Fisher diag}
-    """
-    batch_size = args.get("batch_size_train", 64)
+def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
+    batch_size = args.batch_size_train
 
-    # bật train mode và requires_grad
+    # Chỉ lưu các tham số thuộc backbone
+    fisher = {
+        n: torch.zeros_like(p, device=device) 
+        for n, p in model.named_parameters() 
+        if p.requires_grad and "fc" not in n and "classifier" not in n
+    }
+
     model.train()
-    for p in model.parameters():
-        p.requires_grad_(True)
+    r = np.arange(x.size(0))
+    r = torch.LongTensor(r).to(device)
 
-    fisher = {n: torch.zeros_like(p, device=device) 
-              for n, p in model.named_parameters() if p.requires_grad}
-
-    r = torch.arange(x.size(0), device=device)
     for i in range(0, len(r), batch_size):
-        b = r[i: i + batch_size]
+        if i + batch_size <= len(r):
+            b = r[i : i + batch_size]
+        else:
+            b = r[i:]
         data = x[b].to(device)
         target = y[b].to(device)
 
-        # forward theo đúng kiểu DPCR (trả về dict)
-        output_dict = model(data)
-        if isinstance(output_dict, dict):
-            output = output_dict["logits"]
+        # forward
+        if "space1" in kwargs.keys():  # TRGP
+            output = model(data, space1=kwargs["space1"], space2=kwargs["space2"])[task_id]
         else:
-            output = output_dict
+            output = model(data)[task_id]
 
-        # chọn nhãn theo cấu hình fisher_comp
-        fisher_comp = args.get("fisher_comp", "true")
-        if fisher_comp == "true":
-            pred = output.argmax(1).flatten()   # theo dự đoán
-        elif fisher_comp == "empirical":
-            pred = target                       # theo ground-truth
+        # chọn target cho Fisher
+        if args.fisher_comp == "true":
+            pred = output.argmax(1).flatten()
+        elif args.fisher_comp == "empirical":
+            pred = target
         else:
-            raise ValueError(f"Unknown fisher_comp: {fisher_comp}")
+            raise ValueError("Unknown fisher_comp: {}".format(args.fisher_comp))
 
         loss = F.cross_entropy(output, pred)
 
         optimizer.zero_grad()
         loss.backward()
 
-        # accumulate Fisher diag
+        # Accumulate gradients nhưng chỉ backbone
         for n, p in model.named_parameters():
-            if p.grad is not None:
-                fisher[n] += p.grad.detach().pow(2) * len(data)
+            if p.grad is not None and n in fisher:
+                fisher[n] += p.grad.pow(2) * len(data)
 
+    # average
     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
     return fisher
 
 
-# def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
-#     up = 0
-#     down = 0
-#     for n, p in model.named_parameters():
-#         if (
-#             n in cur_fisher
-#             # and n in old_params
-#             # and n in old_fisher
-#             # and p.shape == old_params[n].shape
-#         ):
-#             delta = (p - old_params[n]).pow(2)
-#             up += torch.sum(cur_fisher[n] * delta)
-#             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
-#         else:
-#             # Bỏ qua tham số mới hoặc khác shape
-#             continue
-#     return up / (down + 1e-8)  # tránh chia 0
-
-def compute_fisher_merging(cur_fisher, old_fisher, model, old_params, device):
-    up, down = 0.0, 0.0
-
+def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
+    up = 0.0
+    down = 0.0
     for n, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        if n not in cur_fisher or n not in old_fisher or n not in old_params:
-            continue
-        if p.shape != old_params[n].shape:
-            # skip nếu shape khác (vd. classifier mở rộng thêm class)
-            continue
-
-        cur_f = cur_fisher[n]
-        old_f = old_fisher[n]
-        delta = (p.detach() - old_params[n].to(device)) ** 2
-
-        up += torch.sum(cur_f * delta).item()
-        down += torch.sum((cur_f + old_f) * delta).item()
+        if n in cur_fisher and n in old_fisher:   # chỉ backbone
+            delta = (p - old_params[n]).pow(2)
+            up += torch.sum(cur_fisher[n] * delta)
+            down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
 
     if down < 1e-12:
-        return 0.0
+        return torch.tensor(0.0, device=p.device)
     return up / down
-
 
 def get_avg_fisher(fisher):
     s = 0
@@ -177,14 +179,14 @@ def get_avg_fisher(fisher):
 # =====================================================================
 
 
-init_epoch = 200
+init_epoch = 2
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100
+epochs = 2 
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
