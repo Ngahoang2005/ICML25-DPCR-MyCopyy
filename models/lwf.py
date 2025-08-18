@@ -1,117 +1,3 @@
-# def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
-#     batch_size = args.batch_size_train
-
-#     # Chỉ lưu các tham số thuộc backbone
-#     fisher = {
-#         n: torch.zeros_like(p, device=device) 
-#         for n, p in model.named_parameters() 
-#         if p.requires_grad and "fc" not in n and "classifier" not in n
-#     }
-
-#     model.train()
-#     r = np.arange(x.size(0))
-#     r = torch.LongTensor(r).to(device)
-
-#     for i in range(0, len(r), batch_size):
-#         if i + batch_size <= len(r):
-#             b = r[i : i + batch_size]
-#         else:
-#             b = r[i:]
-#         data = x[b].to(device)
-#         target = y[b].to(device)
-
-#         output = model(data)[task_id]
-
-#         # chọn target cho Fisher
-#         if args.fisher_comp == "true":
-#             pred = output.argmax(1).flatten()
-#         elif args.fisher_comp == "empirical":
-#             pred = target
-#         else:
-#             raise ValueError("Unknown fisher_comp: {}".format(args.fisher_comp))
-
-#         loss = F.cross_entropy(output, pred)
-
-#         optimizer.zero_grad()
-#         loss.backward()
-
-#         # Accumulate gradients nhưng chỉ backbone
-#         for n, p in model.named_parameters():
-#             if p.grad is not None and n in fisher:
-#                 fisher[n] += p.grad.pow(2) * len(data)
-
-#     # average
-#     fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
-#     return fisher
-def compute_fisher_matrix_diag(args, model, device, optimizer, train_loader, task_id, **kwargs):
-    """
-    Compute diagonal Fisher Information for backbone parameters after a task.
-    Args:
-        args: training arguments (including batch_size, fisher_comp)
-        model: current network
-        device: torch device
-        optimizer: optimizer (needed for backward)
-        train_loader: DataLoader of training dataset
-        task_id: current task index
-        kwargs: extra options (space1/space2 for TRGP)
-    Returns:
-        fisher: dict of diagonal Fisher for backbone parameters
-    """
-    model.train()
-    
-    # chỉ tính Fisher cho backbone, bỏ fc/classifier
-    fisher = {
-        n: torch.zeros_like(p, device=device)
-        for n, p in model.named_parameters()
-        if p.requires_grad and "fc" not in n and "classifier" not in n
-    }
-    
-    for _, inputs, targets in train_loader:
-        inputs = inputs.to(device)
-        # chuyển target thành tensor long
-        targets = torch.tensor(targets, dtype=torch.long, device=device)
-        output = model(inputs)[task_id]
-
-        # chọn target để tính Fisher
-        if args.fisher_comp == "true":
-            pred = output.argmax(1)
-        elif args.fisher_comp == "empirical":
-            pred = targets
-        else:
-            raise ValueError("Unknown fisher_comp: {}".format(args.fisher_comp))
-
-        loss = F.cross_entropy(output, pred)
-        optimizer.zero_grad()
-        loss.backward()
-
-        # accumulate gradient squared cho backbone
-        for n, p in model.named_parameters():
-            if p.grad is not None and n in fisher:
-                fisher[n] += p.grad.pow(2) * inputs.size(0)
-
-    # chia cho tổng số mẫu
-    fisher = {n: p / len(train_loader.dataset) for n, p in fisher.items()}
-    return fisher
-
-
-def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
-    up = 0.0
-    down = 0.0
-    for n, p in model.named_parameters():
-        if n in cur_fisher and n in old_fisher:   # chỉ backbone
-            delta = (p - old_params[n]).pow(2)
-            up += torch.sum(cur_fisher[n] * delta)
-            down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
-    return up / down
-
-def get_avg_fisher(fisher):
-    s = 0
-    n_params = 0
-    for _, p in fisher.items():
-        s += torch.sum(p).item()
-        n_params += p.numel()
-    return s / n_params
-# =====================================================================
 
 import logging
 import numpy as np
@@ -340,7 +226,8 @@ class LwF(BaseLearner):
             model=self._network,
             device=self._device,
             optimizer=optimizer,
-            train_loader=train_loader,
+            x=inputs,
+            y=targets,
             task_id=self._cur_task
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
@@ -367,7 +254,8 @@ class LwF(BaseLearner):
             model=self._network,
             device=self._device,
             optimizer=optimizer,
-            train_loader=train_loader,
+            x=inputs,
+            y=targets,
             task_id=self._cur_task          
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
@@ -586,3 +474,63 @@ def _KD_loss(pred, soft, T):
     soft = torch.softmax(soft / T, dim=1)
     return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
 
+#=====================================================================================
+def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
+    batch_size = args.batch_size_train
+    # Store Fisher Information
+    fisher = {n: torch.zeros(p.shape).to(device) for n, p in model.named_parameters() if p.requires_grad}
+    # Do forward and backward pass to compute the fisher information
+    model.train()
+    r = np.arange(x.size(0))
+    r = torch.LongTensor(r).to(device)
+    # Loop batches
+    for i in range(0, len(r), batch_size):
+        if i + batch_size <= len(r):
+            b = r[i : i + batch_size]
+        else:
+            b = r[i:]
+        data = x[b].to(device)
+        target = y[b].to(device)
+        if "space1" in kwargs.keys():  # TRGP
+            output = model(data, space1=kwargs["space1"], space2=kwargs["space2"])[task_id]
+        else:
+            output = model(data)[task_id]
+
+        if args.fisher_comp == "true":
+            pred = output.argmax(1).flatten()
+        elif args.fisher_comp == "empirical":
+            pred = target
+        else:
+            raise ValueError("Unknown fisher_comp: {}".format(args.fisher_comp))
+
+        loss = torch.nn.functional.cross_entropy(output, pred)
+        optimizer.zero_grad()
+        loss.backward()
+        # Accumulate all gradients from loss with regularization
+        for n, p in model.named_parameters():
+            if p.grad is not None:
+                fisher[n] += p.grad.pow(2) * len(data)
+
+    # Apply mean across all samples
+    fisher = {n: (p / x.size(0)) for n, p in fisher.items()}
+    return fisher
+
+
+def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
+    up = 0
+    down = 0
+    for n, p in model.named_parameters():
+        if n in cur_fisher.keys():
+            delta = (p - old_params[n]).pow(2)
+            up += torch.sum(cur_fisher[n] * delta)
+            down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
+
+    return up / down
+def get_avg_fisher(fisher):
+    s = 0
+    n_params = 0
+    for n, p in fisher.items():
+        s += torch.sum(p).item()
+        n_params += p.numel()
+
+    return s / n_params
