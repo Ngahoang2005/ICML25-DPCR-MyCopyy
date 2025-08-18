@@ -493,12 +493,12 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **
         target = y[b].to(device)
         output = model(data)["logits"]
 
-        if args.fisher_comp == "true":
+        if args["fisher_comp"] == "true":
             pred = output.argmax(1).flatten()
-        elif args.fisher_comp == "empirical":
+        elif args["fisher_comp"] == "empirical":
             pred = target
         else:
-            raise ValueError("Unknown fisher_comp: {}".format(args.fisher_comp))
+            raise ValueError("Unknown fisher_comp: {}".format(args["fisher_comp"]))
 
         loss = torch.nn.functional.cross_entropy(output, pred)
         optimizer.zero_grad()
