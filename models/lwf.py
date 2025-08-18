@@ -17,14 +17,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 200 
+init_epoch = 2
 init_lr = 0.1 
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100 
+epochs = 2 
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -253,7 +253,7 @@ class LwF(BaseLearner):
             if not resume:
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
-                self._init_train(train_loader, test_loader, optimizer, scheduler)
+                self._update_representation(train_loader, test_loader, optimizer, scheduler)
 
             self._build_protos()    
             all_inputs, all_targets = [], []      
@@ -277,7 +277,6 @@ class LwF(BaseLearner):
             lambda_from_fisher = self.args.get("lamda_scale", 1.0) * avg_fisher
             print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
             self.average_backbone_params(lambda_from_fisher)
-
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
@@ -333,7 +332,13 @@ class LwF(BaseLearner):
                 Delta = R_inv @ self.al_classifier.Q
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
-
+        self._network.eval()
+        test_dataset = self.data_manager.get_dataset(
+            np.arange(0, self._total_classes), source="test", mode="test"
+            )
+        test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
+        test_acc = self._compute_accuracy(self._network, test_loader)
+        print(f"Task {self._cur_task} - Test Accuracy (all seen classes): {test_acc:.2f}%")
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
