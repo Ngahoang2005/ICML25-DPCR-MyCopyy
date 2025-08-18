@@ -253,7 +253,7 @@ class LwF(BaseLearner):
             if not resume:
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
-                self._update_representation(train_loader, test_loader, optimizer, scheduler)
+                self._init_train(train_loader, test_loader, optimizer, scheduler)
 
             self._build_protos()    
             all_inputs, all_targets = [], []      
