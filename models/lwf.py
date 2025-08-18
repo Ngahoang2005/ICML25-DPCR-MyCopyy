@@ -293,6 +293,18 @@ class LwF(BaseLearner):
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
             self._build_protos()
+            fisher_backbone = compute_fisher_matrix_diag(
+            args=self.args,
+            model=self._network,
+            device=self._device,
+            optimizer=optimizer,
+            x=torch.cat([data for _, data, _ in train_loader.dataset]),  # hoặc dataset.tensors
+            y=torch.cat([target for _, _, target in train_loader.dataset]),
+            task_id=self._cur_task
+            )
+            avg_fisher = get_avg_fisher(fisher_backbone)
+            print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
+            self.fisher_dict = {self._cur_task: fisher_backbone}
         else:
             resume = self.args['resume']
             if resume:
@@ -309,7 +321,18 @@ class LwF(BaseLearner):
                 self._init_train(train_loader, test_loader, optimizer, scheduler)
             self.average_backbone_params() 
             self._build_protos()                
-                    
+            fisher_backbone = compute_fisher_matrix_diag(
+            args=self.args,
+            model=self._network,
+            device=self._device,
+            optimizer=optimizer,
+            x=torch.cat([data for _, data, _ in train_loader.dataset]),
+            y=torch.cat([target for _, _, target in train_loader.dataset]),
+            task_id=self._cur_task
+            )
+            avg_fisher = get_avg_fisher(fisher_backbone)
+            print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
+            self.fisher_dict[self._cur_task] = fisher_backbone
                     
             if self.args["DPCR"]:
                 print('Using DPCR')
