@@ -253,8 +253,8 @@ class LwF(BaseLearner):
             if not resume:
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
-                self._init_train(train_loader, test_loader, optimizer, scheduler)
-        
+                self._update_representation(train_loader, test_loader, optimizer, scheduler)
+
             self._build_protos()    
             all_inputs, all_targets = [], []      
             for _, inputs, targets in train_loader:
@@ -360,6 +360,24 @@ class LwF(BaseLearner):
                 self._covs.append(torch.tensor(cov).to(self._device))
                 self._projectors.append(self.get_projector_svd(self._covs[class_idx]))
 
+    def average_backbone_params(self, lamda):
+        old_params = {
+            name: param.data.clone()
+            for name, param in self._old_network.named_parameters()
+            if "fc" not in name
+            }
+
+        cur_params = {
+            name: param.data.clone()
+            for name, param in self._network.named_parameters()
+            if "fc" not in name
+            }
+        for name in cur_params:
+            cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
+
+        for name, param in self._network.named_parameters():
+            if name in cur_params:
+                param.data.copy_(cur_params[name])
 
     def _init_train(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(init_epoch))
@@ -370,13 +388,11 @@ class LwF(BaseLearner):
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
-
                 loss = F.cross_entropy(logits, targets)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 losses += loss.item()
-
                 _, preds = torch.max(logits, dim=1)
                 correct += preds.eq(targets.expand_as(preds)).cpu().sum()
                 total += len(targets)
@@ -405,32 +421,8 @@ class LwF(BaseLearner):
             prog_bar.set_description(info)
 
         logging.info(info)
-    def average_backbone_params(self, lamda):
-        old_params = {
-            name: param.data.clone()
-            for name, param in self._old_network.named_parameters()
-            if "fc" not in name
-            }
-
-    # Chỉ lấy backbone của current _network
-        cur_params = {
-            name: param.data.clone()
-            for name, param in self._network.named_parameters()
-            if "fc" not in name
-            }
-
-    # Trung bình cộng
-        for name in cur_params:
-            cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
-
-    # Gán trở lại network hiện tại
-        for name, param in self._network.named_parameters():
-            if name in cur_params:
-                param.data.copy_(cur_params[name])
-
 
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
-
         prog_bar = tqdm(range(epochs))
         for _, epoch in enumerate(prog_bar):
             self._network.train()
@@ -439,18 +431,12 @@ class LwF(BaseLearner):
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
                 logits = self._network(inputs)["logits"]
-
                 fake_targets = targets - self._known_classes
                 loss_clf = F.cross_entropy(
                     logits[:, self._known_classes :], fake_targets
                 )
-                loss_kd = _KD_loss(
-                    logits[:, : self._known_classes],
-                    self._old_network(inputs)["logits"],
-                    T,
-                )
 
-                loss = lamda * loss_kd + loss_clf
+                loss = loss_clf
 
                 optimizer.zero_grad()
                 loss.backward()
