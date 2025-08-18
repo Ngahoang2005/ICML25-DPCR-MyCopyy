@@ -476,7 +476,7 @@ def _KD_loss(pred, soft, T):
 
 #=====================================================================================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
-    batch_size = args.batch_size_train
+    batch_size = 128 
     # Store Fisher Information
     fisher = {n: torch.zeros(p.shape).to(device) for n, p in model.named_parameters() if p.requires_grad}
     # Do forward and backward pass to compute the fisher information
