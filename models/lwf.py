@@ -438,6 +438,29 @@ class LwF(BaseLearner):
             prog_bar.set_description(info)
 
         logging.info(info)
+    def average_backbone_params(self):
+        old_params = {
+            name: param.data.clone()
+            for name, param in self._old_network.named_parameters()
+            if "fc" not in name
+            }
+
+    # Chỉ lấy backbone của current _network
+        cur_params = {
+            name: param.data.clone()
+            for name, param in self._network.named_parameters()
+            if "fc" not in name
+            }
+
+    # Trung bình cộng
+        for name in cur_params:
+            cur_params[name] = 0.5 * (cur_params[name] + old_params[name])
+
+    # Gán trở lại network hiện tại
+        for name, param in self._network.named_parameters():
+            if name in cur_params:
+                param.data.copy_(cur_params[name])
+
 
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
 
@@ -499,26 +522,3 @@ def _KD_loss(pred, soft, T):
     pred = torch.log_softmax(pred / T, dim=1)
     soft = torch.softmax(soft / T, dim=1)
     return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
-def average_backbone_params(self):
-    # Chỉ lấy backbone của old_network
-    old_params = {
-        name: param.data.clone()
-        for name, param in self._old_network.named_parameters()
-        if "fc" not in name
-    }
-
-    # Chỉ lấy backbone của current _network
-    cur_params = {
-        name: param.data.clone()
-        for name, param in self._network.named_parameters()
-        if "fc" not in name
-    }
-
-    # Trung bình cộng
-    for name in cur_params:
-        cur_params[name] = 0.5 * (cur_params[name] + old_params[name])
-
-    # Gán trở lại network hiện tại
-    for name, param in self._network.named_parameters():
-        if name in cur_params:
-            param.data.copy_(cur_params[name])
