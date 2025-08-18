@@ -238,7 +238,7 @@ class LwF(BaseLearner):
             device=self._device,
             optimizer=optimizer,
             x=all_inputs,
-            y=all_inputs,
+            y=all_targets,
             task_id=self._cur_task          
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
