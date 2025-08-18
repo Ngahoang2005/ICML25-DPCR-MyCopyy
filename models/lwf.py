@@ -186,6 +186,7 @@ class LwF(BaseLearner):
 
     def _train(self, train_loader, test_loader):
         resume = self.args['resume']  # set resume=True to use saved checkpoints
+        optimizer = None
         if self._cur_task == 0:
             if resume:
                 print("Loading checkpoint: {}{}_model.pth.tar".format(self.args["model_dir"], self._total_classes))
@@ -204,9 +205,13 @@ class LwF(BaseLearner):
                              unit='batch')
             cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
             crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
+            all_inputs = []
+            all_targets = []
             with torch.no_grad():
                 for i, (_, inputs, targets) in pbar:
                     inputs, targets = inputs.to(self._device), targets.to(self._device)
+                    all_inputs.append(inputs)
+                    all_targets.append(targets)
                     out_backbone = self._network(inputs)["features"]
                     out_fe, pred = self.al_classifier(out_backbone)
                     label_onehot = F.one_hot(targets, self._total_classes).float()
@@ -221,13 +226,15 @@ class LwF(BaseLearner):
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
             self._build_protos()
+            all_inputs = torch.cat(all_inputs)
+            all_targets = torch.cat(all_targets)
             fisher_backbone = compute_fisher_matrix_diag(
             args=self.args,
             model=self._network,
             device=self._device,
             optimizer=optimizer,
-            x=inputs,
-            y=targets,
+            x=all_inputs,
+            y=all_targets,
             task_id=self._cur_task
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
@@ -248,14 +255,20 @@ class LwF(BaseLearner):
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
                 self._init_train(train_loader, test_loader, optimizer, scheduler)
             self.average_backbone_params() 
-            self._build_protos()                
+            self._build_protos()    
+            all_inputs, all_targets = [], []      
+            for _, inputs, targets in train_loader:
+                all_inputs.append(inputs)
+                all_targets.append(targets)
+            all_inputs = torch.cat(all_inputs).to(self._device)
+            all_targets = torch.cat(all_targets).to(self._device)      
             fisher_backbone = compute_fisher_matrix_diag(
             args=self.args,
             model=self._network,
             device=self._device,
             optimizer=optimizer,
-            x=inputs,
-            y=targets,
+            x=all_inputs,
+            y=all_inputs,
             task_id=self._cur_task          
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
