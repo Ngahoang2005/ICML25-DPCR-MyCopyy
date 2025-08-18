@@ -93,13 +93,13 @@ from utils.autoaugment import CIFAR10Policy
 # ----------------------------
 
 # cifar100 defaults
-init_epoch = 200
+init_epoch = 2
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
-epochs = 100
+epochs = 2 
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
