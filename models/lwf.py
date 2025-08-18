@@ -70,12 +70,7 @@ def compute_fisher_matrix_diag(args, model, device, optimizer, train_loader, tas
         inputs = inputs.to(device)
         # chuyển target thành tensor long
         targets = torch.tensor(targets, dtype=torch.long, device=device)
-
-        # forward pass
-        if "space1" in kwargs:
-            output = model(inputs, space1=kwargs["space1"], space2=kwargs["space2"])[task_id]
-        else:
-            output = model(inputs)[task_id]
+        output = model(inputs)[task_id]
 
         # chọn target để tính Fisher
         if args.fisher_comp == "true":
@@ -107,9 +102,6 @@ def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
             delta = (p - old_params[n]).pow(2)
             up += torch.sum(cur_fisher[n] * delta)
             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
-
-    if down < 1e-12:
-        return torch.tensor(0.0, device=p.device)
     return up / down
 
 def get_avg_fisher(fisher):
@@ -139,14 +131,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 2
+init_epoch = 1
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 2 
+epochs = 1 
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -348,8 +340,7 @@ class LwF(BaseLearner):
             model=self._network,
             device=self._device,
             optimizer=optimizer,
-            x=torch.cat([data for _, data, _ in train_loader.dataset]),  # hoặc dataset.tensors
-            y=torch.cat([target for _, _, target in train_loader.dataset]),
+            train_loader=train_loader,
             task_id=self._cur_task
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
@@ -376,9 +367,8 @@ class LwF(BaseLearner):
             model=self._network,
             device=self._device,
             optimizer=optimizer,
-            x=torch.cat([data for _, data, _ in train_loader.dataset]),
-            y=torch.cat([target for _, _, target in train_loader.dataset]),
-            task_id=self._cur_task
+            train_loader=train_loader,
+            task_id=self._cur_task          
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
             print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
@@ -595,3 +585,4 @@ def _KD_loss(pred, soft, T):
     pred = torch.log_softmax(pred / T, dim=1)
     soft = torch.softmax(soft / T, dim=1)
     return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
+
