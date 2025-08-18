@@ -17,14 +17,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 200
+init_epoch = 1 
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100 
+epochs = 1
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -254,7 +254,7 @@ class LwF(BaseLearner):
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
                 self._init_train(train_loader, test_loader, optimizer, scheduler)
-            self.average_backbone_params() 
+        
             self._build_protos()    
             all_inputs, all_targets = [], []      
             for _, inputs, targets in train_loader:
@@ -276,7 +276,8 @@ class LwF(BaseLearner):
             self.fisher_dict[self._cur_task] = fisher_backbone
             lambda_from_fisher = self.args.get("lamda_scale", 1.0) * avg_fisher
             print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
-                    
+            self.average_backbone_params(lambda_from_fisher)
+
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
@@ -404,7 +405,7 @@ class LwF(BaseLearner):
             prog_bar.set_description(info)
 
         logging.info(info)
-    def average_backbone_params(self):
+    def average_backbone_params(self, lamda):
         old_params = {
             name: param.data.clone()
             for name, param in self._old_network.named_parameters()
@@ -420,7 +421,7 @@ class LwF(BaseLearner):
 
     # Trung bình cộng
         for name in cur_params:
-            cur_params[name] = 0.5 * (cur_params[name] + old_params[name])
+            cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
 
     # Gán trở lại network hiện tại
         for name, param in self._network.named_parameters():
