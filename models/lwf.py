@@ -17,7 +17,7 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 10 
+init_epoch = 200 
 init_lr = 100 
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
