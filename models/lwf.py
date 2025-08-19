@@ -17,14 +17,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 200
+init_epoch = 2
 init_lr = 0.1 
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20
+epochs = 2 
 lrate = 0.05 
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -244,7 +244,12 @@ class LwF(BaseLearner):
             avg_fisher = get_avg_fisher(fisher_backbone)
             print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
             self.fisher_dict[self._cur_task] = fisher_backbone
-            lambda_from_fisher = self.args.get("lamda_scale", 1.0) * avg_fisher
+            lambda_from_fisher = compute_fisher_merging(
+                model=self._network,
+                old_params=self._old_network.state_dict(),
+                cur_fisher=fisher_backbone,
+                old_fisher=self.fisher_dict[self._cur_task - 1]
+            )
             print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
             self.average_backbone_params(lambda_from_fisher)
             if self.args["DPCR"]:
@@ -489,7 +494,7 @@ def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
     up = 0
     down = 0
     for n, p in model.named_parameters():
-        if n in cur_fisher.keys():
+        if n in cur_fisher.keys() and "fc" not in n:
             delta = (p - old_params[n]).pow(2)
             up += torch.sum(cur_fisher[n] * delta)
             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
