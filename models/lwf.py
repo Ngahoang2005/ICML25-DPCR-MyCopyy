@@ -17,14 +17,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 2
+init_epoch = 200
 init_lr = 0.1 
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 2 
+epochs = 20 
 lrate = 0.05 
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -353,8 +353,8 @@ class LwF(BaseLearner):
             if "fc" not in name
             }
         for name in cur_params:
-            #cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
-            cur_params[name] = old_params[name]
+            cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
+            #cur_params[name] = old_params[name]
 
         for name, param in self._network.named_parameters():
             if name in cur_params:
