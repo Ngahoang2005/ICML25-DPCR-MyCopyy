@@ -348,7 +348,8 @@ class LwF(BaseLearner):
             if "fc" not in name
             }
         for name in cur_params:
-            cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
+            #cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
+            cur_params[name] = old_params[name]
 
         for name, param in self._network.named_parameters():
             if name in cur_params:
