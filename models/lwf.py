@@ -246,7 +246,7 @@ class LwF(BaseLearner):
             self.fisher_dict[self._cur_task] = fisher_backbone
             lambda_from_fisher = self.args.get("lamda_scale", 1.0) * avg_fisher
             print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
-            #self.average_backbone_params(lambda_from_fisher)
+            self.average_backbone_params(lambda_from_fisher)
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
