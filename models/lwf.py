@@ -15,7 +15,6 @@ from utils.toolkit import target2onehot, tensor2numpy
 from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
-
 init_epoch = 2
 init_lr = 0.1 
 init_milestones = [60, 120, 160]
@@ -23,7 +22,7 @@ init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs =2 
+epochs = 2 
 lrate = 0.05 
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -76,13 +75,9 @@ class LwF(BaseLearner):
         if self.args["DPCR"]:
             self._covs = []
             self._projectors = []
-        for name, param in self._network.named_parameters():
-            print(f"{name:40} {list(param.shape)} requires_grad={param.requires_grad}")
-        print(self._network)
-        total_params = sum(p.numel() for p in self._network.parameters())
-        trainable_params = sum(p.numel() for p in self._network.parameters() if p.requires_grad)
-        print(f"Tổng số tham số: {total_params:,}")
-        print(f"Số tham số trainable: {trainable_params:,}")
+        # không in thông tin model ở đây để sạch log
+        self.old_task_mem = None    # gradient-memory dùng cho GPM / projection
+        self._network_proj = None   # sẽ chứa bản gradient-projected network khi train task>0
 
     def after_task(self):
         self._old_network = self._network.copy().freeze()
@@ -92,7 +87,6 @@ class LwF(BaseLearner):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
         
-
     def incremental_train(self, data_manager):
         self.data_manager = data_manager
         self._cur_task += 1
@@ -158,6 +152,7 @@ class LwF(BaseLearner):
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
         self._train(self.train_loader, self.test_loader)
         if len(self._multiple_gpus) > 1:
+            # unwrap to original module
             self._network = self._network.module
 
     def _train(self, train_loader, test_loader):
@@ -175,6 +170,7 @@ class LwF(BaseLearner):
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
                 self._init_train(train_loader, test_loader, optimizer, scheduler)
 
+            # Analytic learning phase (task 0)
             self._network.eval()
             pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
                              total=len(train_loader),
@@ -205,17 +201,21 @@ class LwF(BaseLearner):
             all_inputs = torch.cat(all_inputs)
             all_targets = torch.cat(all_targets)
             fisher_backbone = compute_fisher_matrix_diag(
-            args=self.args,
-            model=self._network,
-            device=self._device,
-            optimizer=optimizer,
-            x=all_inputs,
-            y=all_targets,
-            task_id=self._cur_task
+                args=self.args,
+                model=self._network,
+                device=self._device,
+                optimizer=optimizer,
+                x=all_inputs,
+                y=all_targets,
+                task_id=self._cur_task
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
             print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
             self.fisher_dict = {self._cur_task: fisher_backbone}
+
+            # set old_task_mem for future tasks (gradient-memory of task 0)
+            self.old_task_mem = compute_task_grad_memory(self._network, train_loader, self._device)
+
         else:
             resume = self.args['resume']
             if resume:
@@ -226,11 +226,18 @@ class LwF(BaseLearner):
                 self._network_module_ptr = self._network.module
             if self._old_network is not None:
                 self._old_network.to(self._device)
+
             if not resume:
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
+
+                # --- NEW: update_representation will train two branches in parallel:
+                #      - self._network (normal update)
+                #      - self._network_proj (projected update based on self.old_task_mem)
+                # After _update_representation returns we will compute Fisher and blend the two networks by lambda_from_fisher.
                 self._update_representation(train_loader, test_loader, optimizer, scheduler)
 
+            # build protos & compute fisher on the *current* network as before
             self._build_protos()    
             all_inputs, all_targets = [], []      
             for _, inputs, targets in train_loader:
@@ -239,17 +246,19 @@ class LwF(BaseLearner):
             all_inputs = torch.cat(all_inputs).to(self._device)
             all_targets = torch.cat(all_targets).to(self._device)      
             fisher_backbone = compute_fisher_matrix_diag(
-            args=self.args,
-            model=self._network,
-            device=self._device,
-            optimizer=optimizer,
-            x=all_inputs,
-            y=all_targets,
-            task_id=self._cur_task          
+                args=self.args,
+                model=self._network,
+                device=self._device,
+                optimizer=optimizer,
+                x=all_inputs,
+                y=all_targets,
+                task_id=self._cur_task          
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
             print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
             self.fisher_dict[self._cur_task] = fisher_backbone
+
+            # compute lambda_from_fisher (giữ nguyên logic gốc)
             lambda_from_fisher = compute_fisher_merging(
                 model=self._network,
                 old_params=self._old_network.state_dict(),
@@ -257,7 +266,22 @@ class LwF(BaseLearner):
                 old_fisher=self.fisher_dict[self._cur_task - 1]
             )
             print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
-            self.average_backbone_params(lambda_from_fisher)
+
+            # --- NEW: Blend parameters between current network (self._network) và projected-network (self._network_proj)
+            # We blend only backbone parameters (không chạm fc) giống ý đồ ban đầu.
+            if self._network_proj is not None:
+                state_cur = self._network.state_dict()
+                state_proj = self._network_proj.state_dict()
+                for name, param in self._network.named_parameters():
+                    if "fc" not in name and name in state_proj:
+                        blended = lambda_from_fisher * state_cur[name].to(self._device) + (1.0 - lambda_from_fisher) * state_proj[name].to(self._device)
+                        param.data.copy_(blended)
+
+            # update old_task_mem to be gradient-memory of the *blended* network for next tasks
+            self.old_task_mem = compute_task_grad_memory(self._network, train_loader, self._device)
+
+            # (Bạn vẫn giữ hoặc thay thế average_backbone_params nếu muốn — mình đã chuyển blending sang trên)
+
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
@@ -275,7 +299,6 @@ class LwF(BaseLearner):
                     for i, (_, inputs, targets) in enumerate(train_loader):
                         inputs, targets = inputs.to(self._device), targets.to(self._device)
                         feats_old = self._old_network(inputs)["features"]
-                        # print(feats_old)
                         feats_new = self._network(inputs)["features"]
                         cov_pwdr += torch.t(feats_old) @ feats_old
                         cov_new += torch.t(feats_new) @ feats_new
@@ -320,13 +343,13 @@ class LwF(BaseLearner):
         test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
         test_acc = self._compute_accuracy(self._network, test_loader)
         print(f"Task {self._cur_task} - Test Accuracy (all seen classes): {test_acc:.2f}%")
+
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
         if all_non_zeros:
             non_zeros_idx = torch.where(S > 0)[0]
             left_eign_vectors = V[:, non_zeros_idx]
-
         else:
             left_eign_vectors = V[:, :512]
         projector = left_eign_vectors @ torch.t(left_eign_vectors)
@@ -347,6 +370,7 @@ class LwF(BaseLearner):
                 self._projectors.append(self.get_projector_svd(self._covs[class_idx]))
 
     def average_backbone_params(self, lamda):
+        # giữ cho tương thích cũ (không dùng trong flow mới nhưng mình vẫn để)
         old_params = {
             name: param.data.clone()
             for name, param in self._old_network.named_parameters()
@@ -360,7 +384,6 @@ class LwF(BaseLearner):
             }
         for name in cur_params:
             cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
-            #cur_params[name] = old_params[name]
 
         for name, param in self._network.named_parameters():
             if name in cur_params:
@@ -409,55 +432,138 @@ class LwF(BaseLearner):
 
         logging.info(info)
 
-    def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
-        prog_bar = tqdm(range(epochs))
+    def _update_representation(self, train_loader, test_loader, optimizer, scheduler, epochs_local=epochs):
+        """
+        Bản cập nhật representation mới:
+        - Tạo 1 bản copy self._network_proj của network ban đầu (trước khi train)
+        - Huấn luyện song song:
+            * self._network: cập nhật bình thường (optimizer)
+            * self._network_proj: cập nhật với gradient-projection (optimizer_proj)
+        - Lưu self._network_proj để blending sau khi tính lambda_from_fisher
+        """
+        # chuẩn bị projected-network (một bản copy của network trước khi train)
+        base_net = self._network.module if hasattr(self._network, "module") else self._network
+        self._network_proj = base_net.copy().to(self._device)
+        # đảm bảo params được trainable
+        for p in self._network_proj.parameters():
+            p.requires_grad = True
+
+        # optimizer cho mạng projected
+        optimizer_proj = optim.SGD(self._network_proj.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
+
+        prog_bar = tqdm(range(epochs_local))
         for _, epoch in enumerate(prog_bar):
             self._network.train()
+            self._network_proj.train()
             losses = 0.0
             correct, total = 0, 0
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
-                logits = self._network(inputs)["logits"]
+                # giống trước: chỉ huấn luyện head phần mới
                 fake_targets = targets - self._known_classes
-                loss_clf = F.cross_entropy(
-                    logits[:, self._known_classes :], fake_targets
-                )
 
-                loss = loss_clf
-
+                # ----- branch current (giữ nguyên behavior cũ) -----
                 optimizer.zero_grad()
+                logits = self._network(inputs)["logits"]
+                loss_clf = F.cross_entropy(logits[:, self._known_classes :], fake_targets)
+                loss = loss_clf
                 loss.backward()
                 optimizer.step()
-                losses += loss.item()
 
+                # ----- branch projected -----
+                optimizer_proj.zero_grad()
+                logits_p = self._network_proj(inputs)["logits"]
+                loss_p = F.cross_entropy(logits_p[:, self._known_classes :], fake_targets)
+                loss_p.backward()
+
+                # lấy gradient hiện tại của projected net
+                grads_cur_proj = [p.grad.detach().clone() if p.grad is not None else None for p in self._network_proj.parameters()]
+
+                # thực hiện projection (nếu có memory)
+                grads_proj = project_gradients(self._network_proj, self.old_task_mem, grads_cur_proj)
+
+                # gán gradient đã chiếu trở lại và step
+                with torch.no_grad():
+                    for p, g in zip(self._network_proj.parameters(), grads_proj):
+                        if p.grad is not None and g is not None:
+                            p.grad.copy_(g)
+                optimizer_proj.step()
+
+                # logging (dựa trên logits của self._network)
                 with torch.no_grad():
                     _, preds = torch.max(logits, dim=1)
-                    correct += preds.eq(targets.expand_as(preds)).cpu().sum()
+                    correct += preds.eq(targets.expand_as(preds)).cpu().sum().item()
                     total += len(targets)
+                    losses += loss.item()
 
             scheduler.step()
-            train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
-            if epoch % 25 == 0:
-                test_acc = self._compute_accuracy(self._network, test_loader)
-                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}".format(
-                    self._cur_task,
-                    epoch + 1,
-                    epochs,
-                    losses / len(train_loader),
-                    train_acc,
-                    test_acc,
-                )
-            else:
-                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}".format(
-                    self._cur_task,
-                    epoch + 1,
-                    epochs,
-                    losses / len(train_loader),
-                    train_acc,
-                )
-            prog_bar.set_description(info)
-        logging.info(info)
-#=====================================================================================
+            train_acc = np.around(100.0 * correct / total, decimals=2) if total > 0 else 0.0
+            prog_bar.set_description(f"Task {_}, Epoch {epoch+1}/{epochs_local} => Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
+        logging.info("Finished update_representation")
+
+# ======================== Helper functions ========================
+
+def project_gradients(model, mem_grads, cur_grads):
+    """
+    Chiếu gradient hiện tại (cur_grads) lên không gian orthogonal của mem_grads
+    mem_grads: list các gradient trung bình của các tham số từ task(s) cũ (hoặc None)
+    cur_grads: list các gradient hiện tại (torch.Tensor hoặc None)
+    Trả về list các gradient đã được project.
+    """
+    if mem_grads is None:
+        # không có memory: trả lại gradient gốc
+        return cur_grads
+
+    proj_grads = []
+    for g_cur, g_mem in zip(cur_grads, mem_grads):
+        if g_cur is None:
+            proj_grads.append(None)
+            continue
+        if g_mem is None:
+            proj_grads.append(g_cur)
+            continue
+
+        # flatten để tính tích trong
+        g_cur_v = g_cur.view(-1)
+        g_mem_v = g_mem.view(-1)
+        dot = torch.dot(g_cur_v, g_mem_v)
+        mem_norm_sq = torch.dot(g_mem_v, g_mem_v) + 1e-12
+        if dot < 0:
+            # project: remove component along g_mem
+            g_proj = g_cur - (dot / mem_norm_sq) * g_mem
+        else:
+            g_proj = g_cur
+        proj_grads.append(g_proj)
+    return proj_grads
+
+
+def compute_task_grad_memory(model, data_loader, device):
+    """
+    Tính gradient trung bình của model trên toàn bộ data_loader.
+    Trả về list gradients (cùng ordering với model.parameters()) để dùng làm memory cho projection.
+    """
+    model.eval()
+    grads_mem = [torch.zeros_like(p) if p.requires_grad else None for p in model.parameters()]
+    total_batches = 0
+    for _, inputs, targets in data_loader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        model.zero_grad()
+        logits = model(inputs)["logits"]
+        loss = F.cross_entropy(logits, targets)
+        loss.backward()
+        for idx, p in enumerate(model.parameters()):
+            if p.grad is not None:
+                grads_mem[idx] += p.grad.detach().clone()
+        total_batches += 1
+
+    if total_batches == 0:
+        return grads_mem
+
+    grads_mem = [ (g / total_batches) if g is not None else None for g in grads_mem ]
+    return grads_mem
+
+# -------------------------------------------------------------------------------------
+# (Các hàm compute_fisher_matrix_diag, compute_fisher_merging, get_avg_fisher giữ nguyên)
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
     batch_size = 128 
     # Store Fisher Information
@@ -506,12 +612,11 @@ def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
 
     return up / down
+
 def get_avg_fisher(fisher):
     s = 0
     n_params = 0
     for n, p in fisher.items():
         s += torch.sum(p).item()
         n_params += p.numel()
-
     return s / n_params
-
