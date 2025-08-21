@@ -15,7 +15,7 @@ from models.base import BaseLearner
 from utils.toolkit import target2onehot, tensor2numpy
 from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
-
+from models.gpm_utils import get_representation_matrix_ResNet18, update_GPM, build_feature_projections, compute_fisher_matrix_diag, compute_fisher_merging, get_avg_fisher
 
 init_epoch = 2 
 init_lr = 0.1 
