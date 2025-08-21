@@ -80,6 +80,16 @@ class LwF(BaseLearner):
             self._covs = []
             self._projectors = []
         self._network.act = {}
+        def save_activation(name):
+            def hook(module, input, output):
+                self._network.act[name] = output.detach()
+            return hook
+
+        self._network.conv1.register_forward_hook(save_activation("conv_in"))
+        self._network.layer1.register_forward_hook(save_activation("layer1"))
+        self._network.layer2.register_forward_hook(save_activation("layer2"))
+        self._network.layer3.register_forward_hook(save_activation("layer3"))
+        self._network.layer4.register_forward_hook(save_activation("layer4"))
 
     def after_task(self):
         self._old_network = self._network.copy().freeze()
