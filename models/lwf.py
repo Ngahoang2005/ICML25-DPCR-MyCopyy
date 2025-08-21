@@ -42,10 +42,6 @@ def compute_conv_output_size(imgsize, kernel_size, stride=1, pad=0):
     return int(np.floor((imgsize + 2 * pad - kernel_size) / stride) + 1)
 
 @torch.no_grad()
-import torch
-import torch.nn.functional as F
-import numpy as np
-
 def get_representation_matrix_ResNet18(net, device, x, y=None):
     # eval mode để lấy feature map
     net.eval()
@@ -132,6 +128,7 @@ def get_representation_matrix_ResNet18(net, device, x, y=None):
             ik += 1
 
     return mat_final
+
 
 def update_GPM(model, mat_list, threshold, feature_list=None):
     """
