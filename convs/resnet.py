@@ -4,6 +4,7 @@ https://github.com/pytorch/vision/blob/master/torchvision/models/resnet.py
 '''
 import torch
 import torch.nn as nn
+from collections import OrderedDict
 try:
     from torchvision.models.utils import load_state_dict_from_url
 except:
