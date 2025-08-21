@@ -20,39 +20,24 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 def attach_hooks(model):
-    """
-    Gắn forward hook vào tất cả conv layers của ResNet18 backbone.
-    Lưu activation vào model.act[name].
-    """
-    model.act = {}
+    # model = CosineIncrementalNet
+    net = model.convnet   # backbone ResNet bên trong
 
     def get_activation(name):
-        def hook(_model, _input, output):
+        def hook(module, input, output):
+            if not hasattr(model, "act"):
+                model.act = {}
             model.act[name] = output.detach()
         return hook
 
-    # Conv đầu vào
-    model.conv1.register_forward_hook(get_activation("conv_in"))
+    # Đăng ký hook vào conv1 và các block của ResNet
+    net.conv1[0].register_forward_hook(get_activation("conv_in"))
 
-    # Layer1
-    for i, block in enumerate(model.layer1):
-        block.conv1.register_forward_hook(get_activation(f"layer1_{i}_conv_0"))
-        block.conv2.register_forward_hook(get_activation(f"layer1_{i}_conv_1"))
+    for i, layer in enumerate([net.layer1, net.layer2, net.layer3, net.layer4]):
+        for j, block in enumerate(layer):
+            block.conv1.register_forward_hook(get_activation(f"layer{i+1}_{j}_conv1"))
+            block.conv2.register_forward_hook(get_activation(f"layer{i+1}_{j}_conv2"))
 
-    # Layer2
-    for i, block in enumerate(model.layer2):
-        block.conv1.register_forward_hook(get_activation(f"layer2_{i}_conv_0"))
-        block.conv2.register_forward_hook(get_activation(f"layer2_{i}_conv_1"))
-
-    # Layer3
-    for i, block in enumerate(model.layer3):
-        block.conv1.register_forward_hook(get_activation(f"layer3_{i}_conv_0"))
-        block.conv2.register_forward_hook(get_activation(f"layer3_{i}_conv_1"))
-
-    # Layer4
-    for i, block in enumerate(model.layer4):
-        block.conv1.register_forward_hook(get_activation(f"layer4_{i}_conv_0"))
-        block.conv2.register_forward_hook(get_activation(f"layer4_{i}_conv_1"))
 def compute_conv_output_size(imgsize, kernel_size, stride=1, pad=0):
     return int(np.floor((imgsize + 2 * pad - kernel_size) / stride) + 1)
 
