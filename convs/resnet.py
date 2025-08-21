@@ -219,24 +219,29 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def _forward_impl(self, x):
-        # See note [TorchScript super()]
         bsz = x.size(0)
-        self.act["conv_in"] = x.view(bsz, 3, 84, 84)
         x = self.conv1(x)  # [bs, 64, 32, 32]
+        self.act["conv_in"] = x
 
-        x_1 = self.layer1(x)  # [bs, 128, 32, 32]
-        x_2 = self.layer2(x_1)  # [bs, 256, 16, 16]
-        x_3 = self.layer3(x_2)  # [bs, 512, 8, 8]
+        x_1 = self.layer1(x)  # [bs, 64, 32, 32]
+        self.act["layer1"] = x_1
+
+        x_2 = self.layer2(x_1)  # [bs, 128, 16, 16]
+        self.act["layer2"] = x_2
+
+        x_3 = self.layer3(x_2)  # [bs, 256, 8, 8]
+        self.act["layer3"] = x_3
+
         x_4 = self.layer4(x_3)  # [bs, 512, 4, 4]
+        self.act["layer4"] = x_4
 
         pooled = self.avgpool(x_4)  # [bs, 512, 1, 1]
         features = torch.flatten(pooled, 1)  # [bs, 512]
-        # x = self.fc(x)
 
         return {
-            'fmaps': [x_1, x_2, x_3, x_4],
-            'features': features
-        }
+        'fmaps': [x_1, x_2, x_3, x_4],
+        'features': features
+    }
 
     def forward(self, x):
         return self._forward_impl(x)
