@@ -220,6 +220,8 @@ class ResNet(nn.Module):
 
     def _forward_impl(self, x):
         # See note [TorchScript super()]
+        bsz = x.size(0)
+        self.act["conv_in"] = x.view(bsz, 3, 84, 84)
         x = self.conv1(x)  # [bs, 64, 32, 32]
 
         x_1 = self.layer1(x)  # [bs, 128, 32, 32]
