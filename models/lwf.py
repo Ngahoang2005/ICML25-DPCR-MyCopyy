@@ -1,3 +1,4 @@
+
 import logging
 import numpy as np
 import torch
@@ -15,14 +16,15 @@ from utils.toolkit import target2onehot, tensor2numpy
 from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
-init_epoch = 20 
+
+init_epoch = 10
 init_lr = 0.1 
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20
+epochs = 10 
 lrate = 0.05 
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -75,10 +77,7 @@ class LwF(BaseLearner):
         if self.args["DPCR"]:
             self._covs = []
             self._projectors = []
-        # không in model info mặc định để log gọn
-        self.old_task_mem = None    # gradient-memory dùng cho projection
-        self._network_proj = None   # bản projected-network (task > 0)
-    
+
     def after_task(self):
         self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
@@ -87,6 +86,7 @@ class LwF(BaseLearner):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
         
+
     def incremental_train(self, data_manager):
         self.data_manager = data_manager
         self._cur_task += 1
@@ -152,7 +152,6 @@ class LwF(BaseLearner):
             self._network = nn.DataParallel(self._network, self._multiple_gpus)
         self._train(self.train_loader, self.test_loader)
         if len(self._multiple_gpus) > 1:
-            # unwrap DataParallel
             self._network = self._network.module
 
     def _train(self, train_loader, test_loader):
@@ -170,7 +169,6 @@ class LwF(BaseLearner):
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
                 self._init_train(train_loader, test_loader, optimizer, scheduler)
 
-            # After initial training, analytic / proto / fisher etc.
             self._network.eval()
             pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
                              total=len(train_loader),
@@ -201,21 +199,17 @@ class LwF(BaseLearner):
             all_inputs = torch.cat(all_inputs)
             all_targets = torch.cat(all_targets)
             fisher_backbone = compute_fisher_matrix_diag(
-                args=self.args,
-                model=self._network,
-                device=self._device,
-                optimizer=optimizer,
-                x=all_inputs,
-                y=all_targets,
-                task_id=self._cur_task
+            args=self.args,
+            model=self._network,
+            device=self._device,
+            optimizer=optimizer,
+            x=all_inputs,
+            y=all_targets,
+            task_id=self._cur_task
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
             print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
             self.fisher_dict = {self._cur_task: fisher_backbone}
-
-            # set old_task_mem for future tasks (gradient-memory of task 0)
-            self.old_task_mem = compute_task_grad_memory(self._network, train_loader, self._device)
-
         else:
             resume = self.args['resume']
             if resume:
@@ -226,36 +220,50 @@ class LwF(BaseLearner):
                 self._network_module_ptr = self._network.module
             if self._old_network is not None:
                 self._old_network.to(self._device)
-
             if not resume:
+                # optimizer for main branch
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
 
-                # ---- CALL new update_representation which trains two branches ----
+                # === 1) Build feature_list from current network (GPM bases) using representation matrices ===
+                # We'll collect activations from current network (eval mode)
+                self._network.eval()
+                # choose correct rep function depending on arch; here assume ResNet variant else alexnet
+                try:
+                    mat_list = get_representation_matrix_ResNet18(self._network, self._device, torch.cat([inputs for _, inputs, _ in train_loader], dim=0), None)
+                except Exception:
+                    # fallback: build from a small sample using stored train_loader batches
+                    sample_inputs = []
+                    for i, (_, inputs, _) in enumerate(train_loader):
+                        sample_inputs.append(inputs)
+                        if i >= 4: break
+                    sample_inputs = torch.cat(sample_inputs, dim=0)
+                    mat_list = get_representation_matrix_alexnet(self._network, self._device, sample_inputs, None)
+
+                # update feature_list (numpy U matrices)
+                # if we already had feature_list from previous tasks, pass them; otherwise empty to create new
+                if not hasattr(self, "_feature_list") or self._feature_list is None:
+                    self._feature_list = []
+                self._feature_list = update_GPM(self._network, mat_list, threshold=[0.95]*len(mat_list), feature_list=self._feature_list)
+
+                # convert feature_list -> projection matrices (torch)
+                feature_proj_mats = self._build_feature_projection_matrices(self._feature_list)
+
+                # === 2) Create projected network copy and train projected branch ===
+                base_net = self._network.module if hasattr(self._network, "module") else self._network
+                self._network_proj = base_net.copy().to(self._device)
+                for p in self._network_proj.parameters():
+                    p.requires_grad = True
+
+                # Projected branch lr: reuse lrate or use a fraction
+                lr_proj = lrate
+                epochs_proj = epochs  # use same epochs variable from init scope
+                self._train_projected_branch(train_loader, epochs_proj, lr_proj, feature_proj_mats)
+
+                # === 3) Train main representation branch (existing update) ===
+                # We call existing routine to update main network
                 self._update_representation(train_loader, test_loader, optimizer, scheduler)
-
-            # build protos & compute fisher on the *current* network as before
-            self._build_protos()    
-            all_inputs, all_targets = [], []      
-            for _, inputs, targets in train_loader:
-                all_inputs.append(inputs)
-                all_targets.append(targets)
-            all_inputs = torch.cat(all_inputs).to(self._device)
-            all_targets = torch.cat(all_targets).to(self._device)      
-            fisher_backbone = compute_fisher_matrix_diag(
-                args=self.args,
-                model=self._network,
-                device=self._device,
-                optimizer=optimizer,
-                x=all_inputs,
-                y=all_targets,
-                task_id=self._cur_task          
-            )
-            avg_fisher = get_avg_fisher(fisher_backbone)
-            print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
-            self.fisher_dict[self._cur_task] = fisher_backbone
-
-            # compute lambda_from_fisher (giữ nguyên logic gốc)
+            
             lambda_from_fisher = compute_fisher_merging(
                 model=self._network,
                 old_params=self._old_network.state_dict(),
@@ -264,19 +272,45 @@ class LwF(BaseLearner):
             )
             print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
 
-            # Blend backbone parameters between current network and projected-network
-            if self._network_proj is not None:
+            # Blend backbone parameters between current network and projected-network (if exists)
+            if hasattr(self, "_network_proj") and self._network_proj is not None:
                 state_cur = self._network.state_dict()
                 state_proj = self._network_proj.state_dict()
                 for name, param in self._network.named_parameters():
                     if "fc" not in name and name in state_proj:
                         blended = lambda_from_fisher * state_cur[name].to(self._device) + (1.0 - lambda_from_fisher) * state_proj[name].to(self._device)
                         param.data.copy_(blended)
+            else:
+                # fallback: average with old network (existing behavior)
+                self.average_backbone_params(lambda_from_fisher)
 
-            # update old_task_mem to be gradient-memory of the blended network for next tasks
-            self.old_task_mem = compute_task_grad_memory(self._network, train_loader, self._device)
-
-            # rest DPCR logic unchanged...
+            self._build_protos()    
+            all_inputs, all_targets = [], []      
+            for _, inputs, targets in train_loader:
+                all_inputs.append(inputs)
+                all_targets.append(targets)
+            all_inputs = torch.cat(all_inputs).to(self._device)
+            all_targets = torch.cat(all_targets).to(self._device)      
+            fisher_backbone = compute_fisher_matrix_diag(
+            args=self.args,
+            model=self._network,
+            device=self._device,
+            optimizer=optimizer,
+            x=all_inputs,
+            y=all_targets,
+            task_id=self._cur_task          
+            )
+            avg_fisher = get_avg_fisher(fisher_backbone)
+            print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
+            self.fisher_dict[self._cur_task] = fisher_backbone
+            lambda_from_fisher = compute_fisher_merging(
+                model=self._network,
+                old_params=self._old_network.state_dict(),
+                cur_fisher=fisher_backbone,
+                old_fisher=self.fisher_dict[self._cur_task - 1]
+            )
+            print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
+            self.average_backbone_params(lambda_from_fisher)
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
@@ -294,6 +328,7 @@ class LwF(BaseLearner):
                     for i, (_, inputs, targets) in enumerate(train_loader):
                         inputs, targets = inputs.to(self._device), targets.to(self._device)
                         feats_old = self._old_network(inputs)["features"]
+                        # print(feats_old)
                         feats_new = self._network(inputs)["features"]
                         cov_pwdr += torch.t(feats_old) @ feats_old
                         cov_new += torch.t(feats_new) @ feats_new
@@ -338,17 +373,94 @@ class LwF(BaseLearner):
         test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
         test_acc = self._compute_accuracy(self._network, test_loader)
         print(f"Task {self._cur_task} - Test Accuracy (all seen classes): {test_acc:.2f}%")
-
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
+
         V, S, VT = torch.svd(raw_matrix)
         if all_non_zeros:
             non_zeros_idx = torch.where(S > 0)[0]
             left_eign_vectors = V[:, non_zeros_idx]
+
         else:
             left_eign_vectors = V[:, :512]
         projector = left_eign_vectors @ torch.t(left_eign_vectors)
         return projector
+    def _build_feature_projection_matrices(self, feature_list):
+        """
+        Convert feature_list (list of numpy U matrices per layer) into
+        torch projection matrices P = U @ U.T (on device).
+        Returns list of torch tensors (float) in the same order as feature_list.
+        """
+        proj_mats = []
+        for U in feature_list:
+            if U is None or U.size == 0:
+                # empty -> identity of size 0 handled later
+                proj_mats.append(None)
+                continue
+            # U: numpy array (D, r)
+            P = np.dot(U, U.T)  # (D, D)
+            P_t = torch.from_numpy(P).float().to(self._device)
+            proj_mats.append(P_t)
+        return proj_mats
+    def _train_projected_branch(self, train_loader, epochs_proj, lr_proj, feature_proj_mats):
+        """
+        Train a copy self._network_proj with gradient projection using feature_proj_mats.
+        feature_proj_mats: list of torch projection matrices (or None) mapped to conv layers in param order.
+        This function updates self._network_proj in-place.
+        """
+        # create optimizer for projected net
+        optimizer_proj = optim.SGD(self._network_proj.parameters(), lr=lr_proj, momentum=0.9, weight_decay=0.0)
+
+        # training loop: mirror _update_representation's inner loop but with projection
+        for epoch in range(epochs_proj):
+            self._network_proj.train()
+            losses = 0.0
+            correct, total = 0, 0
+            for _, (_, inputs, targets) in enumerate(train_loader):
+                inputs, targets = inputs.to(self._device), targets.to(self._device)
+                optimizer_proj.zero_grad()
+                out = self._network_proj(inputs)["logits"]
+                fake_targets = targets - self._known_classes
+                loss = F.cross_entropy(out[:, self._known_classes :], fake_targets)
+                loss.backward()
+
+                # Apply gradient projection layer-wise
+                kk = 0
+                for name, p in self._network_proj.named_parameters():
+                    if p.grad is None:
+                        continue
+                    # apply only to conv weights (4D) and other weight matrices you want to protect
+                    if p.ndim == 4:
+                        P = None
+                        # find corresponding proj mat
+                        if kk < len(feature_proj_mats):
+                            P = feature_proj_mats[kk]
+                        if P is not None:
+                            # p.grad shape: (out_ch, in_ch, k, k)
+                            sz = p.grad.data.size(0)
+                            g = p.grad.data.view(sz, -1)   # (out_ch, rest)
+                            # project each row of g using P (which is rest x rest)
+                            # g_proj_row = g_row - P @ g_row  if P is projection on row-space
+                            # using original style: g' = g - g @ P  (keeps row dims)
+                            # ensure device & dtype
+                            P = P.to(g.device).type_as(g)
+                            g_proj = g - torch.mm(g, P)
+                            p.grad.data.copy_(g_proj.view_as(p.grad.data))
+                        kk += 1
+                    elif p.ndim == 1:
+                        # keep bias/bn params updatable (do not zero them)
+                        continue
+
+                optimizer_proj.step()
+                losses += loss.item()
+                with torch.no_grad():
+                    _, preds = torch.max(out, dim=1)
+                    correct += preds.eq(targets).sum().item()
+                    total += targets.size(0)
+            # you can log per epoch if required
+        # done training projected branch
+
+
 
     def _build_protos(self):
         if self.args["DPCR"]:
@@ -378,6 +490,7 @@ class LwF(BaseLearner):
             }
         for name in cur_params:
             cur_params[name] = lamda * (cur_params[name]) + (1-lamda)*old_params[name]
+            #cur_params[name] = old_params[name]
 
         for name, param in self._network.named_parameters():
             if name in cur_params:
@@ -426,135 +539,55 @@ class LwF(BaseLearner):
 
         logging.info(info)
 
-    def _update_representation(self, train_loader, test_loader, optimizer, scheduler, epochs_local=epochs):
-        """
-        - Tạo bản copy self._network_proj trước khi bắt đầu update
-        - Huấn luyện song song:
-            * self._network (normal update)
-            * self._network_proj (projected update dùng self.old_task_mem)
-        - Sau xong, self._network_proj giữ trạng thái để blending bởi lambda_from_fisher
-        """
-        # chuẩn bị projected-network (copy module gốc)
-        base_net = self._network.module if hasattr(self._network, "module") else self._network
-        # giả sử base_net có method copy(); nếu không, bạn cần implement copy() trong IncrementalNet
-        self._network_proj = base_net.copy().to(self._device)
-        for p in self._network_proj.parameters():
-            p.requires_grad = True
-
-        optimizer_proj = optim.SGD(self._network_proj.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
-
-        prog_bar = tqdm(range(epochs_local))
+    def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
+        prog_bar = tqdm(range(epochs))
         for _, epoch in enumerate(prog_bar):
             self._network.train()
-            self._network_proj.train()
             losses = 0.0
             correct, total = 0, 0
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
-                fake_targets = targets - self._known_classes
-
-                # current network (nhánh bình thường)
-                optimizer.zero_grad()
                 logits = self._network(inputs)["logits"]
-                loss_clf = F.cross_entropy(logits[:, self._known_classes :], fake_targets)
+                fake_targets = targets - self._known_classes
+                loss_clf = F.cross_entropy(
+                    logits[:, self._known_classes :], fake_targets
+                )
+
                 loss = loss_clf
+
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
+                losses += loss.item()
 
-                # projected network (nhánh có gradient projection)
-                optimizer_proj.zero_grad()
-                logits_p = self._network_proj(inputs)["logits"]
-                loss_p = F.cross_entropy(logits_p[:, self._known_classes :], fake_targets)
-                loss_p.backward()
-
-                # capture grads của projected net (clone & detach)
-                grads_cur_proj = [p.grad.detach().clone() if (p.grad is not None) else None for p in self._network_proj.parameters()]
-
-                # project gradients dựa trên old_task_mem
-                grads_proj = project_gradients(self._network_proj, self.old_task_mem, grads_cur_proj)
-
-                # gán gradient đã project vào rồi step
-                with torch.no_grad():
-                    for p_param, g in zip(self._network_proj.parameters(), grads_proj):
-                        if p_param.grad is not None and g is not None:
-                            p_param.grad.copy_(g)
-                optimizer_proj.step()
-
-                # logging dùng logits từ self._network
                 with torch.no_grad():
                     _, preds = torch.max(logits, dim=1)
-                    correct += preds.eq(targets.expand_as(preds)).cpu().sum().item()
+                    correct += preds.eq(targets.expand_as(preds)).cpu().sum()
                     total += len(targets)
-                    losses += loss.item()
 
             scheduler.step()
-            train_acc = np.around(100.0 * correct / total, decimals=2) if total > 0 else 0.0
-            prog_bar.set_description(f"Task {_}, Epoch {epoch+1}/{epochs_local} => Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
-        logging.info("Finished update_representation")
-
-
-# ======================== Helper functions ========================
-
-def project_gradients(model, mem_grads, cur_grads):
-    """
-    Project cur_grads using mem_grads (both are lists in the same order as model.parameters()).
-    - Flatten trước khi tính dot, chỉ project khi shapes match.
-    - Nếu mem_grads is None -> trả cur_grads.
-    """
-    if mem_grads is None:
-        return cur_grads
-
-    proj_grads = []
-    for g_cur, g_mem in zip(cur_grads, mem_grads):
-        if g_cur is None:
-            proj_grads.append(None)
-            continue
-
-        # flatten
-        g_cur_v = g_cur.view(-1)
-        g_proj_v = g_cur_v.clone()
-
-        if g_mem is not None:
-            g_mem_v = g_mem.view(-1)
-            # chỉ project khi kích thước bằng nhau
-            if g_cur_v.shape == g_mem_v.shape:
-                dot = torch.dot(g_cur_v, g_mem_v)
-                mem_norm_sq = torch.dot(g_mem_v, g_mem_v) + 1e-12
-                if dot < 0:
-                    g_proj_v = g_cur_v - (dot / mem_norm_sq) * g_mem_v
-        # reshape về dạng cũ
-        proj_grads.append(g_proj_v.view_as(g_cur))
-    return proj_grads
-
-
-def compute_task_grad_memory(model, data_loader, device):
-    """
-    Tính gradient trung bình trên toàn bộ data_loader (theo thứ tự model.parameters()).
-    Trả về list gradients (hoặc None cho các param không trainable).
-    """
-    model.eval()
-    grads_mem = [torch.zeros_like(p) if p.requires_grad else None for p in model.parameters()]
-    total_batches = 0
-    for _, inputs, targets in data_loader:
-        inputs, targets = inputs.to(device), targets.to(device)
-        model.zero_grad()
-        logits = model(inputs)["logits"]
-        loss = F.cross_entropy(logits, targets)
-        loss.backward()
-        for idx, p in enumerate(model.parameters()):
-            if p.grad is not None:
-                grads_mem[idx] += p.grad.detach().clone()
-        total_batches += 1
-
-    if total_batches == 0:
-        return grads_mem
-
-    grads_mem = [ (g / total_batches) if g is not None else None for g in grads_mem ]
-    return grads_mem
-
-
-# -------------------------------------------------------------------------------------
-# compute_fisher_matrix_diag, compute_fisher_merging, get_avg_fisher (giữ nguyên)
+            train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
+            if epoch % 25 == 0:
+                test_acc = self._compute_accuracy(self._network, test_loader)
+                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}".format(
+                    self._cur_task,
+                    epoch + 1,
+                    epochs,
+                    losses / len(train_loader),
+                    train_acc,
+                    test_acc,
+                )
+            else:
+                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}".format(
+                    self._cur_task,
+                    epoch + 1,
+                    epochs,
+                    losses / len(train_loader),
+                    train_acc,
+                )
+            prog_bar.set_description(info)
+        logging.info(info)
+#=====================================================================================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
     batch_size = 128 
     # Store Fisher Information
@@ -603,11 +636,229 @@ def compute_fisher_merging(model, old_params, cur_fisher, old_fisher):
             down += torch.sum((cur_fisher[n] + old_fisher[n]) * delta)
 
     return up / down
-
 def get_avg_fisher(fisher):
     s = 0
     n_params = 0
     for n, p in fisher.items():
         s += torch.sum(p).item()
         n_params += p.numel()
+
     return s / n_params
+
+
+
+def get_representation_matrix_alexnet(net, device, x, y=None):
+    # Collect activations by forward pass
+    r = np.arange(x.size(0))
+    np.random.shuffle(r)
+    r = torch.LongTensor(r).to(device)
+    b = r[0:125]  # Take 125 random samples
+    example_data = x[b]
+    example_data = example_data.to(device)
+    example_out = net(example_data)
+
+    batch_list = [2 * 12, 100, 100, 125, 125]
+    mat_list = []
+    act_key = list(net.act.keys())
+    for i in range(len(net.map)):
+        bsz = batch_list[i]
+        k = 0
+        if i < 3:
+            ksz = net.ksize[i]
+            s = compute_conv_output_size(net.map[i], net.ksize[i])
+            mat = np.zeros((net.ksize[i] * net.ksize[i] * net.in_channel[i], s * s * bsz))
+            act = net.act[act_key[i]].detach().cpu().numpy()
+            for kk in range(bsz):
+                for ii in range(s):
+                    for jj in range(s):
+                        mat[:, k] = act[kk, :, ii : ksz + ii, jj : ksz + jj].reshape(-1)
+                        k += 1
+            mat_list.append(mat)
+        else:
+            act = net.act[act_key[i]].detach().cpu().numpy()
+            activation = act[0:bsz].transpose()
+            mat_list.append(activation)
+
+    # print("-" * 30)
+    # print("Representation Matrix")
+    # print("-" * 30)
+    # for i in range(len(mat_list)):
+    #     print("Layer {} : {}".format(i + 1, mat_list[i].shape))
+    # print("-" * 30)
+    return mat_list
+
+
+def get_representation_matrix_ResNet18(net, device, x, y=None):
+    # Collect activations by forward pass
+    net.eval()
+    r = np.arange(x.size(0))
+    np.random.shuffle(r)
+    r = torch.LongTensor(r).to(device)
+    b = r[0:100]  # ns=100 examples
+    example_data = x[b]
+    example_data = example_data.to(device)
+    example_out = net(example_data)
+
+    act_list = []
+    act_list.extend(
+        [
+            net.act["conv_in"],
+            net.layer1[0].act["conv_0"],
+            net.layer1[0].act["conv_1"],
+            net.layer1[1].act["conv_0"],
+            net.layer1[1].act["conv_1"],
+            net.layer2[0].act["conv_0"],
+            net.layer2[0].act["conv_1"],
+            net.layer2[1].act["conv_0"],
+            net.layer2[1].act["conv_1"],
+            net.layer3[0].act["conv_0"],
+            net.layer3[0].act["conv_1"],
+            net.layer3[1].act["conv_0"],
+            net.layer3[1].act["conv_1"],
+            net.layer4[0].act["conv_0"],
+            net.layer4[0].act["conv_1"],
+            net.layer4[1].act["conv_0"],
+            net.layer4[1].act["conv_1"],
+        ]
+    )
+
+    batch_list = [
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        10,
+        50,
+        50,
+        50,
+        100,
+        100,
+        100,
+        100,
+        100,
+        100,
+    ]  # scaled
+    # network arch
+    stride_list = [2, 1, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1]
+    map_list = [84, 42, 42, 42, 42, 42, 21, 21, 21, 21, 11, 11, 11, 11, 6, 6, 6]
+    in_channel = [3, 20, 20, 20, 20, 20, 40, 40, 40, 40, 80, 80, 80, 80, 160, 160, 160]
+
+    pad = 1
+    sc_list = [5, 9, 13]
+    p1d = (1, 1, 1, 1)
+    mat_final = []  # list containing GPM Matrices
+    mat_list = []
+    mat_sc_list = []
+    for i in range(len(stride_list)):
+        if i == 0:
+            ksz = 3
+        else:
+            ksz = 3
+        bsz = batch_list[i]
+        st = stride_list[i]
+        k = 0
+        s = compute_conv_output_size(map_list[i], ksz, stride_list[i], pad)
+        mat = np.zeros((ksz * ksz * in_channel[i], s * s * bsz))
+        act = F.pad(act_list[i], p1d, "constant", 0).detach().cpu().numpy()
+        for kk in range(bsz):
+            for ii in range(s):
+                for jj in range(s):
+                    mat[:, k] = act[kk, :, st * ii : ksz + st * ii, st * jj : ksz + st * jj].reshape(-1)
+                    k += 1
+        mat_list.append(mat)
+        # For Shortcut Connection
+        if i in sc_list:
+            k = 0
+            s = compute_conv_output_size(map_list[i], 1, stride_list[i])
+            mat = np.zeros((1 * 1 * in_channel[i], s * s * bsz))
+            act = act_list[i].detach().cpu().numpy()
+            for kk in range(bsz):
+                for ii in range(s):
+                    for jj in range(s):
+                        mat[:, k] = act[kk, :, st * ii : 1 + st * ii, st * jj : 1 + st * jj].reshape(-1)
+                        k += 1
+            mat_sc_list.append(mat)
+
+    ik = 0
+    for i in range(len(mat_list)):
+        mat_final.append(mat_list[i])
+        if i in [6, 10, 14]:
+            mat_final.append(mat_sc_list[ik])
+            ik += 1
+
+    # print("-" * 30)
+    # print("Representation Matrix")
+    # print("-" * 30)
+    # for i in range(len(mat_final)):
+    #     print("Layer {} : {}".format(i + 1, mat_final[i].shape))
+    # print("-" * 30)
+    return mat_final
+
+
+def update_GPM(
+    model,
+    mat_list,
+    threshold,
+    feature_list=[],
+):
+    # print("Threshold: ", threshold)
+    if not feature_list:
+        # After First Task
+        for i in range(len(mat_list)):
+            activation = mat_list[i]
+            U, S, Vh = np.linalg.svd(activation, full_matrices=False)
+            # criteria (Eq-5)
+            sval_total = (S**2).sum()
+            sval_ratio = (S**2) / sval_total
+            r = np.sum(np.cumsum(sval_ratio) < threshold[i])  # +1
+            feature_list.append(U[:, 0:r])
+    else:
+        for i in range(len(mat_list)):
+            activation = mat_list[i]
+            U1, S1, Vh1 = np.linalg.svd(activation, full_matrices=False)
+            sval_total = (S1**2).sum()
+            # Projected Representation (Eq-8)
+            act_hat = activation - np.dot(np.dot(feature_list[i], feature_list[i].transpose()), activation)
+            U, S, Vh = np.linalg.svd(act_hat, full_matrices=False)
+            # criteria (Eq-9)
+            sval_hat = (S**2).sum()
+            sval_ratio = (S**2) / sval_total
+            accumulated_sval = (sval_total - sval_hat) / sval_total
+
+            r = 0
+            for ii in range(sval_ratio.shape[0]):
+                if accumulated_sval < threshold[i]:
+                    accumulated_sval += sval_ratio[ii]
+                    r += 1
+                else:
+                    break
+            if r == 0:
+                print("Skip Updating GPM for layer: {}".format(i + 1))
+                continue
+            # update GPM
+            Ui = np.hstack((feature_list[i], U[:, 0:r]))
+            if Ui.shape[1] > Ui.shape[0]:
+                feature_list[i] = Ui[:, 0 : Ui.shape[0]]
+            else:
+                feature_list[i] = Ui
+
+    # print("-" * 40)
+    # print("Gradient Constraints Summary")
+    # print("-" * 40)
+    # for i in range(len(feature_list)):
+    #     print(
+    #         "Layer {} : {}/{}".format(
+    #             i + 1, feature_list[i].shape[1], feature_list[i].shape[0]
+    #         )
+    #     )
+    # print("-" * 40)
+    return feature_list
+def compute_conv_output_size(Lin, kernel_size, stride=1, padding=0, dilation=1):
+    return int(
+        np.floor(
+            (Lin + 2 * padding - dilation * (kernel_size - 1) - 1) / float(stride) + 1
+        )
+    )
