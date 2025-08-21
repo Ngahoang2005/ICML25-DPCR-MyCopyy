@@ -692,121 +692,51 @@ def get_representation_matrix_alexnet(net, device, x, y=None):
     return mat_list
 
 
-def get_representation_matrix_ResNet18(net, device, x, y=None):
-    # Collect activations by forward pass
-    net.eval()
-    with torch.no_grad():
-        _ = net(x.to(device))              # ép chạy forward 1 lần
-        act = net.act["conv_in"] 
-    r = np.arange(x.size(0))
-    np.random.shuffle(r)
-    r = torch.LongTensor(r).to(device)
-    b = r[0:100]  # ns=100 examples
-    example_data = x[b.to(x.device)]
+def compute_conv_output_size(H, ksz, stride, pad=0):
+    """Chuẩn công thức tính output size của conv."""
+    return (H - ksz + 2 * pad) // stride + 1
 
-    example_data = example_data.to(device)
-    example_out = net(example_data)
+def get_representation_matrix_ResNet18(act_list, stride_list=None, max_batch=10):
+    """
+    Sinh ma trận biểu diễn từ activation list của ResNet18.
+    Không hard-code, tự lấy từ shape.
 
-    act_list = []
-    act_list.extend(
-        [
-            net.act["conv_in"],
-            net.convnet.layer1[0].act["conv_0"],
-            net.convnet.layer1[0].act["conv_1"],
-            net.convnet.layer1[1].act["conv_0"],
-            net.convnet.layer1[1].act["conv_1"],    
-            net.convnet.layer2[0].act["conv_0"],
-            net.convnet.layer2[0].act["conv_1"],    
-            net.convnet.layer2[1].act["conv_0"],
-            net.convnet.layer2[1].act["conv_1"],
-            net.convnet.layer3[0].act["conv_0"],
-            net.convnet.layer3[0].act["conv_1"],    
-            net.convnet.layer3[1].act["conv_0"],
-            net.convnet.layer3[1].act["conv_1"],
-            net.convnet.layer4[0].act["conv_0"],
-            net.convnet.layer4[0].act["conv_1"],
-            net.convnet.layer4[1].act["conv_0"],
-            net.convnet.layer4[1].act["conv_1"],
-        ]
-    )
+    Args:
+        act_list: list các activation tensor (BxCxHxW)
+        stride_list: list stride của mỗi layer (nếu None -> mặc định stride=1)
+        max_batch: số sample tối đa để tính
+    Returns:
+        mats: list các ma trận biểu diễn (numpy)
+    """
+    mats = []
+    if stride_list is None:
+        stride_list = [1] * len(act_list)
 
-    batch_list = [
-        10,
-        10,
-        10,
-        10,
-        10,
-        10,
-        10,
-        10,
-        50,
-        50,
-        50,
-        100,
-        100,
-        100,
-        100,
-        100,
-        100,
-    ]  # scaled
-    # network arch
-    stride_list = [2, 1, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1, 2, 1, 1, 1]
-    map_list = [84, 42, 42, 42, 42, 42, 21, 21, 21, 21, 11, 11, 11, 11, 6, 6, 6]
-    in_channel = [3, 20, 20, 20, 20, 20, 40, 40, 40, 40, 80, 80, 80, 80, 160, 160, 160]
+    for i, act in enumerate(act_list):
+        B, C, H, W = act.shape
+        bsz = min(B, max_batch)  # tránh lấy batch quá lớn
+        ksz = 3 if i > 0 else 3   # bạn có thể đổi kernel cho layer đầu nếu muốn
+        st = stride_list[i] if i < len(stride_list) else 1
 
-    pad = 1
-    sc_list = [5, 9, 13]
-    p1d = (1, 1, 1, 1)
-    mat_final = []  # list containing GPM Matrices
-    mat_list = []
-    mat_sc_list = []
-    for i in range(len(stride_list)):
-        if i == 0:
-            ksz = 3
-        else:
-            ksz = 3
-        bsz = batch_list[i]
-        st = stride_list[i]
-        C = act_list[i].shape[1]
-        k = 0
-        s = compute_conv_output_size(map_list[i], ksz, stride_list[i], pad)
+        # Tính output size sau conv
+        s = compute_conv_output_size(H, ksz, st, pad=1)
+
+        # Khởi tạo ma trận rỗng
         mat = np.zeros((ksz * ksz * C, s * s * bsz))
-        act = F.pad(act_list[i], p1d, "constant", 0).detach().cpu().numpy()
-        for kk in range(bsz):
-            for ii in range(s):
-                for jj in range(s):
-                    mat[:, k] = act[kk, :, st * ii : ksz + st * ii, st * jj : ksz + st * jj].reshape(-1)
-                    k += 1
-        mat_list.append(mat)
-        # For Shortcut Connection
-        if i in sc_list:
-            k = 0
-            s = compute_conv_output_size(map_list[i], 1, stride_list[i])
-    
-            C = act_list[i].shape[1]  # số channel thật
-            mat = np.zeros((1 * 1 * C, s * s * bsz))
-            act = act_list[i].detach().cpu().numpy()
-            for kk in range(bsz):
-                for ii in range(s):
-                    for jj in range(s):
-                        mat[:, k] = act[kk, :, st * ii : 1 + st * ii, st * jj : 1 + st * jj].reshape(-1)
-                        k += 1
-            mat_sc_list.append(mat)
 
-    ik = 0
-    for i in range(len(mat_list)):
-        mat_final.append(mat_list[i])
-        if i in [6, 10, 14]:
-            mat_final.append(mat_sc_list[ik])
-            ik += 1
+        # Flatten sample
+        act_np = act.detach().cpu().numpy()[:bsz]  # (bsz, C, H, W)
+        col_idx = 0
+        for b in range(bsz):
+            for i1 in range(0, H - ksz + 1, st):
+                for j1 in range(0, W - ksz + 1, st):
+                    patch = act_np[b, :, i1:i1+ksz, j1:j1+ksz].reshape(-1)
+                    mat[:, col_idx] = patch
+                    col_idx += 1
 
-    # print("-" * 30)
-    # print("Representation Matrix")
-    # print("-" * 30)
-    # for i in range(len(mat_final)):
-    #     print("Layer {} : {}".format(i + 1, mat_final[i].shape))
-    # print("-" * 30)
-    return mat_final
+        mats.append(mat)
+
+    return mats
 
 
 def update_GPM(
@@ -867,9 +797,3 @@ def update_GPM(
     #     )
     # print("-" * 40)
     return feature_list
-def compute_conv_output_size(Lin, kernel_size, stride=1, padding=0, dilation=1):
-    return int(
-        np.floor(
-            (Lin + 2 * padding - dilation * (kernel_size - 1) - 1) / float(stride) + 1
-        )
-    )
