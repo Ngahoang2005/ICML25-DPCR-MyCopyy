@@ -22,7 +22,7 @@ init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100
+epochs = 20
 lrate = 0.05 
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -426,7 +426,7 @@ class LwF(BaseLearner):
 
         logging.info(info)
 
-    def _update_representation(self, train_loader, test_loader, optimizer, scheduler, epochs_local=100):
+    def _update_representation(self, train_loader, test_loader, optimizer, scheduler, epochs_local=epochs):
         """
         - Tạo bản copy self._network_proj trước khi bắt đầu update
         - Huấn luyện song song:
