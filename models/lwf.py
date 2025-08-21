@@ -17,14 +17,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 10
+init_epoch = 1
 init_lr = 0.1 
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 10 
+epochs = 1 
 lrate = 0.05 
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -694,7 +694,7 @@ def get_representation_matrix_ResNet18(net, device, x, y=None):
     np.random.shuffle(r)
     r = torch.LongTensor(r).to(device)
     b = r[0:100]  # ns=100 examples
-    example_data = x[b]
+    example_data = x.cpu()[b]
     example_data = example_data.to(device)
     example_out = net(example_data)
 
