@@ -232,16 +232,7 @@ class LwF(BaseLearner):
                 # We'll collect activations from current network (eval mode)
                 self._network.eval()
                 # choose correct rep function depending on arch; here assume ResNet variant else alexnet
-                try:
-                    mat_list = get_representation_matrix_ResNet18(self._network, self._device, torch.cat([inputs for _, inputs, _ in train_loader], dim=0), None)
-                except Exception:
-                    # fallback: build from a small sample using stored train_loader batches
-                    sample_inputs = []
-                    for i, (_, inputs, _) in enumerate(train_loader):
-                        sample_inputs.append(inputs)
-                        if i >= 4: break
-                    sample_inputs = torch.cat(sample_inputs, dim=0)
-                    mat_list = get_representation_matrix_alexnet(self._network, self._device, sample_inputs, None)
+                mat_list = get_representation_matrix_ResNet18(self._network, self._device, torch.cat([inputs for _, inputs, _ in train_loader], dim=0), None)
 
                 # update feature_list (numpy U matrices)
                 # if we already had feature_list from previous tasks, pass them; otherwise empty to create new
