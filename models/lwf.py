@@ -19,144 +19,181 @@ from utils.autoaugment import CIFAR10Policy
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# ---- hook để lưu activations vào model.act[...] ----
 def attach_hooks(model):
-    # model = CosineIncrementalNet
-    net = model.convnet   # backbone ResNet bên trong
+    """
+    Gắn forward hooks vào backbone ResNet bên trong CosineIncrementalNet.
+    Lưu activation vào model.act["conv_in"], model.act["layer1_0_conv1"], ...
+    """
+    # model: CosineIncrementalNet
+    if not hasattr(model, "convnet"):
+        raise AttributeError("attach_hooks: model has no attribute 'convnet' (expected CosineIncrementalNet).")
+    net = model.convnet
+
+    model.act = {}  # dictionary lưu activations
 
     def get_activation(name):
         def hook(module, input, output):
-            if not hasattr(model, "act"):
-                model.act = {}
-            model.act[name] = output.detach()
+            # lưu activation (detach để tránh giữ graph)
+            model.act[name] = output.detach().cpu()
         return hook
 
-    # Đăng ký hook vào conv1 và các block của ResNet
-    net.conv1[0].register_forward_hook(get_activation("conv_in"))
+    # conv1: ở convnet.conv1 là Sequential([Conv2d, BN, ReLU]) -> Conv2d nằm ở index 0
+    if isinstance(net.conv1, torch.nn.Sequential):
+        conv1_module = net.conv1[0]
+    else:
+        conv1_module = net.conv1
+    conv1_module.register_forward_hook(get_activation("conv_in"))
 
-    for i, layer in enumerate([net.layer1, net.layer2, net.layer3, net.layer4]):
-        for j, block in enumerate(layer):
-            block.conv1.register_forward_hook(get_activation(f"layer{i+1}_{j}_conv1"))
-            block.conv2.register_forward_hook(get_activation(f"layer{i+1}_{j}_conv2"))
+    # Các block trong layer1..layer4, đặt key theo dạng "layer{L}_{B}_conv1"/"layer{L}_{B}_conv2"
+    for layer_idx in range(1, 5):
+        layer = getattr(net, f"layer{layer_idx}")
+        for block_idx, block in enumerate(layer):
+            # mỗi block là BasicBlock có conv1 và conv2
+            block.conv1.register_forward_hook(get_activation(f"layer{layer_idx}_{block_idx}_conv1"))
+            block.conv2.register_forward_hook(get_activation(f"layer{layer_idx}_{block_idx}_conv2"))
 
+
+# ---- tiện ích tính kích thước conv output ----
 def compute_conv_output_size(imgsize, kernel_size, stride=1, pad=0):
     return int(np.floor((imgsize + 2 * pad - kernel_size) / stride) + 1)
 
+
+# ---- lấy representation matrices không dùng hard-code in_channel ----
 @torch.no_grad()
-def get_representation_matrix_ResNet18(net, device, x, y=None):
-    # eval mode để lấy feature map
-    net.eval()
-    r = np.arange(x.size(0))
-    np.random.shuffle(r)
-    r = torch.LongTensor(r).to(device)
-    b = r[0:100]  # lấy 100 sample
-    example_data = x[b].to(device)
+def get_representation_matrix_ResNet18(model, device, x, y=None, nsamples=100):
+    """
+    Trả về danh sách các ma trận biểu diễn (mat_list) theo thứ tự layer conv (ResNet18 style).
+    model: CosineIncrementalNet (hoặc object có .convnet = ResNet)
+    x: tensor toàn bộ dữ liệu train của task (CPU or GPU)
+    """
+    # đảm bảo hooks đã gắn
+    if not hasattr(model, "act"):
+        attach_hooks(model)
 
-    # forward để sinh activation
-    _ = net(example_data)
+    model.eval()
+    # chọn nsamples ngẫu nhiên
+    n_total = x.size(0)
+    ns = min(nsamples, n_total)
+    idx = torch.randperm(n_total)[:ns].long()
+    example_data = x[idx].to(device)
 
-    # list activations (các hook đã gắn trước đó)
-    act_list = [
-        net.act["conv_in"],
-        net.layer1[0].act["conv_0"],
-        net.layer1[0].act["conv_1"],
-        net.layer1[1].act["conv_0"],
-        net.layer1[1].act["conv_1"],
-        net.layer2[0].act["conv_0"],
-        net.layer2[0].act["conv_1"],
-        net.layer2[1].act["conv_0"],
-        net.layer2[1].act["conv_1"],
-        net.layer3[0].act["conv_0"],
-        net.layer3[0].act["conv_1"],
-        net.layer3[1].act["conv_0"],
-        net.layer3[1].act["conv_1"],
-        net.layer4[0].act["conv_0"],
-        net.layer4[0].act["conv_1"],
-        net.layer4[1].act["conv_0"],
-        net.layer4[1].act["conv_1"],
-    ]
+    # forward qua model để hooks lưu activation (hooks lưu về CPU tensor)
+    _ = model(example_data)
 
-    # các tham số tham khảo (giữ nguyên stride_list, batch_list, sc_list)
+    # tạo danh sách keys tương ứng (theo thứ tự sẽ dùng)
+    keys = ["conv_in"]
+    for layer_idx in range(1, 5):
+        layer = getattr(model.convnet, f"layer{layer_idx}")
+        for block_idx in range(len(layer)):
+            keys.append(f"layer{layer_idx}_{block_idx}_conv1")
+            keys.append(f"layer{layer_idx}_{block_idx}_conv2")
+
+    # cấu hình giống PGM tham chiếu (batch_list, stride_list)
     batch_list = [10,10,10,10,10,10,10,10,50,50,50,100,100,100,100,100,100]
     stride_list = [2,1,1,1,1,2,1,1,1,2,1,1,1,2,1,1,1]
-    sc_list = [5, 9, 13]   # các layer có shortcut
-    pad = 1
-    p1d = (1,1,1,1)
+    sc_list = [5, 9, 13]  # indices (in mat_list index space BEFORE adding sc mats) có shortcut mats (1x1)
+    p = 1  # padding for patches
 
-    mat_final = []
+    mat_list = []
     mat_sc_list = []
 
-    for i, act in enumerate(act_list):
-        act = act.detach().cpu().numpy()
-        C = act.shape[1]   # số kênh thực tế
+    for i, key in enumerate(keys):
+        if key not in model.act:
+            raise KeyError(f"Activation for key '{key}' not found in model.act. Did you call attach_hooks() before forward?")
+        act_tensor = model.act[key]  # CPU tensor shape [bsz, C, H, W]
+        # chuyển numpy để build mat; dùng np.pad
+        act_np = act_tensor.numpy()
+        # pad spatial dims by 1
+        act_np = np.pad(act_np, ((0,0),(0,0),(p,p),(p,p)), mode='constant')
         bsz = batch_list[i]
-        st = stride_list[i]
+        # bảo đảm bsz <= actual samples
+        if bsz > act_np.shape[0]:
+            bsz = act_np.shape[0]
+        C = act_np.shape[1]
+        H = act_np.shape[2]
         ksz = 3
+        st = stride_list[i]
 
-        # pad feature map
-        act = F.pad(torch.tensor(act), p1d, "constant", 0).numpy()
-        H = act.shape[2]
-        s = (H - ksz)//st + 1   # output size theo stride
-
-        mat = np.zeros((ksz*ksz*C, s*s*bsz))
+        # số vị trí patch theo chiều không gian
+        s = (H - ksz)//st + 1
+        cols = s * s * bsz
+        rows = ksz * ksz * C
+        mat = np.zeros((rows, cols), dtype=np.float32)
         k = 0
         for kk in range(bsz):
             for ii in range(s):
                 for jj in range(s):
-                    patch = act[kk, :, st*ii:ksz+st*ii, st*jj:ksz+st*jj].reshape(-1)
+                    patch = act_np[kk, :, st*ii:st*ii+ksz, st*jj:st*jj+ksz].reshape(-1)
                     mat[:, k] = patch
                     k += 1
-        mat_final.append(mat)
+        mat_list.append(mat)
 
-        # xử lý shortcut connection
+        # nếu layer có shortcut 1x1 (theo thiết kế PGM), lưu mat_sc tương ứng
         if i in sc_list:
+            # 1x1 patches
             s_sc = (H - 1)//st + 1
-            mat_sc = np.zeros((1*1*C, s_sc*s_sc*bsz))
-            k = 0
+            mat_sc = np.zeros((1*1*C, s_sc*s_sc*bsz), dtype=np.float32)
+            k2 = 0
             for kk in range(bsz):
                 for ii in range(s_sc):
                     for jj in range(s_sc):
-                        patch = act[kk, :, st*ii:1+st*ii, st*jj:1+st*jj].reshape(-1)
-                        mat_sc[:, k] = patch
-                        k += 1
+                        patch = act_np[kk, :, st*ii:st*ii+1, st*jj:st*jj+1].reshape(-1)
+                        mat_sc[:, k2] = patch
+                        k2 += 1
             mat_sc_list.append(mat_sc)
 
-    # merge shortcut vào list chính
+    # bây giờ hợp nhất mat_list và mat_sc_list theo vị trí đúng
+    mat_final = []
     ik = 0
-    for i in range(len(mat_final)):
-        if i in [6, 10, 14]:
-            mat_final.append(mat_sc_list[ik])
-            ik += 1
+    for i in range(len(mat_list)):
+        mat_final.append(mat_list[i])
+        if i in [6, 10, 14]:  # theo cách PGM gốc chèn shortcut sau các layer tương ứng
+            if ik < len(mat_sc_list):
+                mat_final.append(mat_sc_list[ik])
+                ik += 1
 
     return mat_final
 
 
+# ---- update_GPM (giữ nguyên logic SVD) ----
 def update_GPM(model, mat_list, threshold, feature_list=None):
     """
-    Trả về feature_list (list các ma trận U của từng layer).
-    threshold: list (ví dụ 0.97 cho mỗi layer)
+    Cập nhật feature basis (U) từ mat_list.
+    threshold: list hoặc scalar tỷ lệ năng lượng (ví dụ 0.97)
     """
     if feature_list is None:
         feature_list = []
 
+    # ensure threshold list
+    if np.isscalar(threshold):
+        threshold = [threshold] * len(mat_list)
+
     if len(feature_list) == 0:
-        # Task đầu: lấy U theo tỉ lệ năng lượng threshold
         for i in range(len(mat_list)):
             activation = mat_list[i]
             U, S, Vh = np.linalg.svd(activation, full_matrices=False)
             sval_total = (S**2).sum()
+            if sval_total <= 0:
+                feature_list.append(np.zeros((activation.shape[0], 0), dtype=np.float32))
+                continue
             sval_ratio = (S**2) / sval_total
-            r = np.sum(np.cumsum(sval_ratio) < threshold[i])
-            feature_list.append(U[:, :r])
+            r = int(np.sum(np.cumsum(sval_ratio) < threshold[i]))
+            feature_list.append(U[:, :r].astype(np.float32))
     else:
-        # Task sau: trừ phần đã span bởi U trước đó rồi lấy phần dư
         for i in range(len(mat_list)):
             activation = mat_list[i]
             U1, S1, Vh1 = np.linalg.svd(activation, full_matrices=False)
             sval_total = (S1**2).sum()
-            # projected residual
             Ui_old = feature_list[i]
-            act_hat = activation - Ui_old @ (Ui_old.T @ activation)
+            if Ui_old.size == 0:
+                act_hat = activation
+            else:
+                act_hat = activation - Ui_old @ (Ui_old.T @ activation)
             U, S, Vh = np.linalg.svd(act_hat, full_matrices=False)
+            if sval_total <= 0:
+                continue
             sval_hat = (S**2).sum()
             sval_ratio = (S**2) / sval_total
             accumulated_sval = (sval_total - sval_hat) / sval_total
@@ -169,24 +206,20 @@ def update_GPM(model, mat_list, threshold, feature_list=None):
                 else:
                     break
             if r == 0:
-                # không thêm gì
                 continue
-
             Ui = np.hstack((feature_list[i], U[:, :r]))
             if Ui.shape[1] > Ui.shape[0]:
                 feature_list[i] = Ui[:, : Ui.shape[0]]
             else:
-                feature_list[i] = Ui
+                feature_list[i] = Ui.astype(np.float32)
     return feature_list
 
+
+# ---- build P = U U^T để chiếu gradient ----
 def build_feature_projections(feature_list, device):
-    """
-    Từ list U (numpy) → list P = U U^T (torch, float, on device) để sử dụng khi chiếu gradient.
-    """
     proj_list = []
     for U in feature_list:
         if U.size == 0:
-            # layer này chưa có subspace (skip)
             proj_list.append(None)
             continue
         Ut = torch.from_numpy(U).float().to(device)  # [d, r]
@@ -378,9 +411,6 @@ class LwF(BaseLearner):
             all_inputs = torch.cat(all_inputs).to(self._device)
             with torch.no_grad():
                 if not hasattr(self._network, "act"):
-                    print("===== MODEL STRUCTURE =====")
-                    print(self._network)
-                    print("===========================")
                     attach_hooks(self._network)
                 rep_mats = get_representation_matrix_ResNet18(self._network, self._device, all_inputs)
             thr = [0.97] * len(rep_mats)
@@ -594,22 +624,21 @@ class LwF(BaseLearner):
 
                 # Gradient Projections — theo PGM tham chiếu:
                 kk = 0
-                for k, (name, params) in enumerate(self._network.named_parameters()):
+                for name, params in self._network.named_parameters():
                     if params.grad is None:
                         continue
-                    if len(params.size()) == 4:  # conv weights
-                        # flatten theo chiều out_channels: (C_out, C_in*k*k) để nhân với P [d,d]
-                        sz = params.grad.data.size(0)
-                        grad_view = params.grad.data.view(sz, -1)  # [C_out, D]
-                        P = self.feature_mat[kk]
+                    if params.dim() == 4:  # conv weight: (out_ch, in_ch, k, k)
+                        grad_view = params.grad.data.view(params.grad.data.size(0), -1)  # [C_out, D]
+                        P = None
+                        if kk < len(self.feature_mat):
+                            P = self.feature_mat[kk]
                         if P is not None:
-                            # g' = g - g P
-                            # (C_out,D) - (C_out,D) @ (D,D) = (C_out,D)
+                        # g' = g - g P
                             grad_proj = grad_view - torch.mm(grad_view, P)
                             params.grad.data.copy_(grad_proj.view_as(params.grad.data))
                         kk += 1
-                    elif len(params.size()) == 1 and self._cur_task != 0:
-                        # zero bias để tránh drift
+                    elif params.dim() == 1 and self._cur_task != 0:
+                    # zero biases for non-first task
                         params.grad.data.zero_()
 
                 optimizer.step()
