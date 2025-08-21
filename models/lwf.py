@@ -685,6 +685,9 @@ def get_representation_matrix_alexnet(net, device, x, y=None):
 def get_representation_matrix_ResNet18(net, device, x, y=None):
     # Collect activations by forward pass
     net.eval()
+    with torch.no_grad():
+        _ = net(X.to(device))              # ép chạy forward 1 lần
+        act = net.act["conv_in"] 
     r = np.arange(x.size(0))
     np.random.shuffle(r)
     r = torch.LongTensor(r).to(device)
