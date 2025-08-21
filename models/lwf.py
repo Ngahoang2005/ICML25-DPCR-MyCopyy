@@ -625,18 +625,39 @@ class LwF(BaseLearner):
         return projector
 
     def _build_protos(self):
-        if self.args["DPCR"]:
-            for class_idx in range(self._known_classes, self._total_classes):
-                data, targets, idx_dataset = self.data_manager.get_dataset(np.arange(class_idx, class_idx + 1),
-                                                                           source='train',
-                                                                           mode='test', shot=self.shot, ret_data=True)
-                idx_loader = DataLoader(idx_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
-                vectors, _ = self._extract_vectors(idx_loader)
-                class_mean = np.mean(vectors, axis=0)  # vectors.mean(0)
-                cov = np.dot(np.transpose(vectors),vectors)
-                self._protos.append(torch.tensor(class_mean).to(self._device))
-                self._covs.append(torch.tensor(cov).to(self._device))
-                self._projectors.append(self.get_projector_svd(self._covs[class_idx]))
+
+        self._protos = []
+        self._projectors = []
+
+        for class_idx in range(len(self._covs)):
+            projector = self.get_projector_svd(self._covs[class_idx])
+            self._projectors.append(projector)
+
+        # Tính prototype vector cho class_idx
+        # (trung bình các feature vectors trong class đó)
+            feats, labels = [], []
+            loader = self.data_manager.get_dataset(
+            np.arange(class_idx, class_idx + 1), source="train", mode="test"
+        )
+            loader = DataLoader(loader, batch_size=128, shuffle=False, num_workers=4)
+
+            with torch.no_grad():
+                for _, inputs, targets in loader:
+                    inputs, targets = inputs.to(self._device), targets.to(self._device)
+                    out = self._network(inputs)["features"]
+                    mask = targets == class_idx
+                    if mask.sum() > 0:
+                            feats.append(out[mask])
+                    labels.append(targets[mask])
+
+            if len(feats) > 0:
+                feats = torch.cat(feats, dim=0)
+                proto = feats.mean(0, keepdim=True)  # mean feature = prototype
+                self._protos.append(proto)
+            else:
+            # nếu không có sample thì thêm vector zero
+                self._protos.append(torch.zeros(1, self.al_classifier.fe_size).to(self._device))
+
 
     def average_backbone_params(self, lamda):
         old_params = {
