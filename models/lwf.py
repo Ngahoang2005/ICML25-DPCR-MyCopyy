@@ -653,10 +653,9 @@ def get_representation_matrix_alexnet(net, device, x, y=None):
     np.random.shuffle(r)
     r = torch.LongTensor(r).to(device)
     b = r[0:125]  # Take 125 random samples
-    example_data = x[b]
+    example_data = x.cpu()[b]
     example_data = example_data.to(device)
     example_out = net(example_data)
-
     batch_list = [2 * 12, 100, 100, 125, 125]
     mat_list = []
     act_key = list(net.act.keys())
