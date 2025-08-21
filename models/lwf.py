@@ -782,7 +782,7 @@ def get_representation_matrix_ResNet18(net, device, x, y=None):
         if i in sc_list:
             k = 0
             s = compute_conv_output_size(map_list[i], 1, stride_list[i])
-            mat = np.zeros((1 * 1 * in_channel[i], s * s * bsz))
+    
             C = act_list[i].shape[1]  # số channel thật
             mat = np.zeros((1 * 1 * C, s * s * bsz))
             act = act_list[i].detach().cpu().numpy()
