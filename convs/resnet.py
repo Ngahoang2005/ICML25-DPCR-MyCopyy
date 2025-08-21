@@ -39,6 +39,7 @@ def conv1x1(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
+# --- sửa BasicBlock ---
 class BasicBlock(nn.Module):
     expansion = 1
     __constants__ = ['downsample']
@@ -52,7 +53,7 @@ class BasicBlock(nn.Module):
             raise ValueError('BasicBlock only supports groups=1 and base_width=64')
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
-        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        # modules
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
@@ -61,14 +62,21 @@ class BasicBlock(nn.Module):
         self.downsample = downsample
         self.stride = stride
 
+        # act storage for this block (so caller can access layer1[0].act[...] etc)
+        self.act = {}
+
     def forward(self, x):
         identity = x
 
         out = self.conv1(x)
+        # record activation after conv1 (conv_0)
+        self.act["conv_0"] = out
         out = self.bn1(out)
         out = self.relu(out)
 
         out = self.conv2(out)
+        # record activation after conv2 (conv_1)
+        self.act["conv_1"] = out
         out = self.bn2(out)
 
         if self.downsample is not None:
@@ -80,6 +88,7 @@ class BasicBlock(nn.Module):
         return out
 
 
+# --- sửa Bottleneck ---
 class Bottleneck(nn.Module):
     expansion = 4
     __constants__ = ['downsample']
@@ -90,7 +99,7 @@ class Bottleneck(nn.Module):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
-        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        # modules
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = norm_layer(width)
         self.conv2 = conv3x3(width, width, stride, groups, dilation)
@@ -101,18 +110,24 @@ class Bottleneck(nn.Module):
         self.downsample = downsample
         self.stride = stride
 
+        # act storage
+        self.act = {}
+
     def forward(self, x):
         identity = x
 
         out = self.conv1(x)
+        self.act["conv_0"] = out
         out = self.bn1(out)
         out = self.relu(out)
 
         out = self.conv2(out)
+        self.act["conv_1"] = out
         out = self.bn2(out)
         out = self.relu(out)
 
         out = self.conv3(out)
+        self.act["conv_2"] = out
         out = self.bn3(out)
 
         if self.downsample is not None:
@@ -128,7 +143,7 @@ class ResNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None,args=None):
+                 norm_layer=None, args=None):
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -220,29 +235,31 @@ class ResNet(nn.Module):
 
     def _forward_impl(self, x):
         bsz = x.size(0)
-        x = self.conv1(x)  # [bs, 64, 32, 32]
+        # conv1 may be Sequential (conv->bn->relu(->pool)); we want the raw output after conv1 block
+        x = self.conv1(x)
+        # store top-level conv_in (same name như hàm get_rep expects)
         self.act["conv_in"] = x
 
-        x_1 = self.layer1(x)  # [bs, 64, 32, 32]
+        x_1 = self.layer1(x)  # Sequential of BasicBlock/Bottleneck
+        # store top-level layer1 activation (the output of entire stage)
         self.act["layer1"] = x_1
 
-        x_2 = self.layer2(x_1)  # [bs, 128, 16, 16]
+        x_2 = self.layer2(x_1)
         self.act["layer2"] = x_2
 
-        x_3 = self.layer3(x_2)  # [bs, 256, 8, 8]
+        x_3 = self.layer3(x_2)
         self.act["layer3"] = x_3
 
-        x_4 = self.layer4(x_3)  # [bs, 512, 4, 4]
+        x_4 = self.layer4(x_3)
         self.act["layer4"] = x_4
 
-        pooled = self.avgpool(x_4)  # [bs, 512, 1, 1]
-        features = torch.flatten(pooled, 1)  # [bs, 512]
+        pooled = self.avgpool(x_4)
+        features = torch.flatten(pooled, 1)
 
         return {
-        'fmaps': [x_1, x_2, x_3, x_4],
-        'features': features
-    }
-
+            'fmaps': [x_1, x_2, x_3, x_4],
+            'features': features
+        }
     def forward(self, x):
         return self._forward_impl(x)
 
