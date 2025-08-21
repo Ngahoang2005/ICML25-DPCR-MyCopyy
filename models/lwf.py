@@ -242,7 +242,8 @@ class LwF(BaseLearner):
                 # We'll collect activations from current network (eval mode)
                 self._network.eval()
                 # choose correct rep function depending on arch; here assume ResNet variant else alexnet
-                mat_list = get_representation_matrix_ResNet18(self._network, self._device, torch.cat([inputs for _, inputs, _ in train_loader], dim=0), None)
+                mat_list = get_representation_matrix_ResNet18(
+                    self._network, self._device, self.train_loader.dataset.data, None)
 
                 # update feature_list (numpy U matrices)
                 # if we already had feature_list from previous tasks, pass them; otherwise empty to create new
@@ -648,48 +649,6 @@ def get_avg_fisher(fisher):
         n_params += p.numel()
 
     return s / n_params
-
-
-
-def get_representation_matrix_alexnet(net, device, x, y=None):
-    # Collect activations by forward pass
-    r = np.arange(x.size(0))
-    np.random.shuffle(r)
-    r = torch.LongTensor(r).to(device)
-    b = r[0:125]  # Take 125 random samples
-    example_data = x[b.to(x.device)]
-
-    example_data = example_data.to(device)
-    example_out = net(example_data)
-    batch_list = [2 * 12, 100, 100, 125, 125]
-    mat_list = []
-    act_key = list(net.act.keys())
-    for i in range(len(net.map)):
-        bsz = batch_list[i]
-        k = 0
-        if i < 3:
-            ksz = net.ksize[i]
-            s = compute_conv_output_size(net.map[i], net.ksize[i])
-            mat = np.zeros((net.ksize[i] * net.ksize[i] * net.in_channel[i], s * s * bsz))
-            act = net.act[act_key[i]].detach().cpu().numpy()
-            for kk in range(bsz):
-                for ii in range(s):
-                    for jj in range(s):
-                        mat[:, k] = act[kk, :, ii : ksz + ii, jj : ksz + jj].reshape(-1)
-                        k += 1
-            mat_list.append(mat)
-        else:
-            act = net.act[act_key[i]].detach().cpu().numpy()
-            activation = act[0:bsz].transpose()
-            mat_list.append(activation)
-
-    # print("-" * 30)
-    # print("Representation Matrix")
-    # print("-" * 30)
-    # for i in range(len(mat_list)):
-    #     print("Layer {} : {}".format(i + 1, mat_list[i].shape))
-    # print("-" * 30)
-    return mat_list
 
 
 def compute_conv_output_size(H, ksz, stride, pad=0):
