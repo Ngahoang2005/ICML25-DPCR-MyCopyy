@@ -77,6 +77,9 @@ class LwF(BaseLearner):
         if self.args["DPCR"]:
             self._covs = []
             self._projectors = []
+        self.feature_list = []    # list các U (numpy arrays) theo layer
+        self.feature_mat  = []    # list các P = U U^T (torch tensors)
+        self.acc_matrix   = {}    #
 
     def after_task(self):
         self._old_network = self._network.copy().freeze()
@@ -154,7 +157,7 @@ class LwF(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
-    def _train(self, train_loader, test_loader):
+        def _train(self, train_loader, test_loader):
         resume = self.args['resume']  # set resume=True to use saved checkpoints
         optimizer = None
         if self._cur_task == 0:
@@ -171,8 +174,7 @@ class LwF(BaseLearner):
 
             self._network.eval()
             pbar = tqdm(enumerate(train_loader), desc='Analytic Learning Phase=' + str(self._cur_task),
-                             total=len(train_loader),
-                             unit='batch')
+                        total=len(train_loader), unit='batch')
             cov = torch.zeros(self.al_classifier.fe_size, self.al_classifier.fe_size).to(self._device)
             crs_cor = torch.zeros(self.al_classifier.fc.weight.size(1), self._total_classes).to(self._device)
             all_inputs = []
@@ -192,24 +194,27 @@ class LwF(BaseLearner):
             self.al_classifier.Q = self.al_classifier.Q + crs_cor
             R_inv = torch.inverse(self.al_classifier.R.cpu()).to(self._device)
             Delta = R_inv @ self.al_classifier.Q
-
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
-                    F.normalize(torch.t(Delta.float()), p=2, dim=-1))
-            self._build_protos()
-            all_inputs = torch.cat(all_inputs)
-            all_targets = torch.cat(all_targets)
+                F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+
+            # ==== PGM: khởi tạo feature_list từ Task 0 ====
+            all_inputs = torch.cat(all_inputs).to(self._device)
+            with torch.no_grad():
+                rep_mats = get_representation_matrix_ResNet18(self._network, self._device, all_inputs)
+            thr = [0.97] * len(rep_mats)
+            self.feature_list = update_GPM(self._network, rep_mats, threshold=thr, feature_list=None)
+            self.feature_mat  = build_feature_projections(self.feature_list, self._device)
+
+            # Fisher cho task 0
+            all_targets = torch.cat(all_targets).to(self._device)
             fisher_backbone = compute_fisher_matrix_diag(
-            args=self.args,
-            model=self._network,
-            device=self._device,
-            optimizer=optimizer,
-            x=all_inputs,
-            y=all_targets,
-            task_id=self._cur_task
+                args=self.args, model=self._network, device=self._device, optimizer=optimizer,
+                x=all_inputs, y=all_targets, task_id=self._cur_task
             )
             avg_fisher = get_avg_fisher(fisher_backbone)
             print(f"Task {self._cur_task} - Average Fisher (backbone): {avg_fisher}")
             self.fisher_dict = {self._cur_task: fisher_backbone}
+
         else:
             resume = self.args['resume']
             if resume:
@@ -220,23 +225,29 @@ class LwF(BaseLearner):
                 self._network_module_ptr = self._network.module
             if self._old_network is not None:
                 self._old_network.to(self._device)
+
             if not resume:
+                # Lưu init params (để tách PGM và free phases)
                 init_params = {n: p.data.clone() for n, p in self._network.named_parameters() if "fc" not in n}
 
-                # ===== Train 1: Projected training (GPM) =====
+                # ===== Train 1: Projected training (PGM) =====
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
-                self.train_projected(train_loader, test_loader, optimizer, scheduler)
+                self.train_projected(train_loader, test_loader, optimizer, scheduler)  # <== NEW
                 gpm_params = {n: p.data.clone() for n, p in self._network.named_parameters() if "fc" not in n}
+
+                # reset về init để train lần 2
                 for n, p in self._network.named_parameters():
                     if n in init_params:
                         p.data.copy_(init_params[n])
-                # ===== Train 2: Free update =====
+
+                # ===== Train 2: Free update (không chiếu) =====
                 optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
                 self._update_representation(train_loader, test_loader, optimizer, scheduler)
                 free_params = {n: p.data.clone() for n, p in self._network.named_parameters() if "fc" not in n}
-                # ===== Fisher-based merging =====
+
+                # ===== Fisher-based merging (old vs new) =====
                 all_inputs, all_targets = [], []
                 for _, inputs, targets in train_loader:
                     all_inputs.append(inputs)
@@ -245,13 +256,8 @@ class LwF(BaseLearner):
                 all_targets = torch.cat(all_targets).to(self._device)
 
                 fisher_backbone = compute_fisher_matrix_diag(
-                    args=self.args,
-                    model=self._network,
-                    device=self._device,
-                    optimizer=optimizer,
-                    x=all_inputs,
-                    y=all_targets,
-                    task_id=self._cur_task
+                    args=self.args, model=self._network, device=self._device, optimizer=optimizer,
+                    x=all_inputs, y=all_targets, task_id=self._cur_task
                 )
                 self.fisher_dict[self._cur_task] = fisher_backbone
                 lambda_from_fisher = compute_fisher_merging(
@@ -262,12 +268,21 @@ class LwF(BaseLearner):
                 )
                 print(f"Task {self._cur_task} - lambda_from_fisher: {lambda_from_fisher}")
 
-                # Merge GPM + Free params
+                # Merge giữa 2 bộ tham số (GPM vs Free)
                 for n, p in self._network.named_parameters():
                     if n in gpm_params:
                         merged = lambda_from_fisher * free_params[n] + (1 - lambda_from_fisher) * gpm_params[n]
                         p.data.copy_(merged)
-            self._build_protos()    
+
+                # ====== Cập nhật GPM sau khi hoàn thành task (từ dữ liệu hiện tại) ======
+                with torch.no_grad():
+                    rep_mats = get_representation_matrix_ResNet18(self._network, self._device, all_inputs)
+                thr = [0.97] * len(rep_mats)
+                self.feature_list = update_GPM(self._network, rep_mats, threshold=thr, feature_list=self.feature_list)
+                self.feature_mat  = build_feature_projections(self.feature_list, self._device)
+
+            # DPCR như code cũ của bạn (giữ nguyên)
+            self._build_protos()
             if self.args["DPCR"]:
                 print('Using DPCR')
                 self._network.eval()
@@ -285,7 +300,6 @@ class LwF(BaseLearner):
                     for i, (_, inputs, targets) in enumerate(train_loader):
                         inputs, targets = inputs.to(self._device), targets.to(self._device)
                         feats_old = self._old_network(inputs)["features"]
-                        # print(feats_old)
                         feats_new = self._network(inputs)["features"]
                         cov_pwdr += torch.t(feats_old) @ feats_old
                         cov_new += torch.t(feats_new) @ feats_new
@@ -323,13 +337,97 @@ class LwF(BaseLearner):
                 Delta = R_inv @ self.al_classifier.Q
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+
+        # ====== Đánh giá tổng thể + lưu acc theo từng task để tính forgetting ======
         self._network.eval()
         test_dataset = self.data_manager.get_dataset(
             np.arange(0, self._total_classes), source="test", mode="test"
-            )
+        )
         test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
         test_acc = self._compute_accuracy(self._network, test_loader)
         print(f"Task {self._cur_task} - Test Accuracy (all seen classes): {test_acc:.2f}%")
+
+        # Acc riêng từng task để tính Forgetting
+        acc_per_task = []
+        task_size_fn = self.data_manager.get_task_size
+        for prev_task in range(self._cur_task + 1):
+            start_c = sum(task_size_fn(t) for t in range(prev_task))
+            end_c   = start_c + task_size_fn(prev_task)
+            prev_dataset = self.data_manager.get_dataset(
+                np.arange(start_c, end_c), source="test", mode="test"
+            )
+            prev_loader = DataLoader(prev_dataset, batch_size=128, shuffle=False, num_workers=4)
+            acc_prev = self._compute_accuracy(self._network, prev_loader)
+            acc_per_task.append(acc_prev)
+            print(f"   Accuracy on Task {prev_task}: {acc_prev:.2f}%")
+        self.acc_matrix[self._cur_task] = acc_per_task
+
+        if self._cur_task > 0:
+            # Forgetting score: mean over old tasks of (max previous acc - current acc)
+            forgetting = []
+            for i in range(self._cur_task):  # từng task cũ
+                acc_hist = [self.acc_matrix[k][i] for k in range(i, self._cur_task + 1)]  # từ khi xong task i đến hiện tại
+                max_prev = max(acc_hist[:-1])  # peak trước hiện tại
+                last_acc = acc_hist[-1]
+                forgetting.append(max_prev - last_acc)
+            avg_forgetting = float(np.mean(forgetting)) if len(forgetting) else 0.0
+            print(f"Task {self._cur_task} - Forgetting Score: {avg_forgetting:.2f}")
+
+    # ----------------- NEW: train_projected (PGM) -----------------
+    def train_projected(self, train_loader, test_loader, optimizer, scheduler):
+        """
+        Train với Gradient Projection Method:
+        - Xây subspace (self.feature_list) → self.feature_mat (P = UU^T)
+        - Chỉ chiếu gradient của các conv weights (len==4)
+        """
+        device = self._device
+        criterion = torch.nn.CrossEntropyLoss()
+
+        # Bảo đảm đã có feature_mat (nếu mới vào task>0 mà vẫn trống, xây từ dữ liệu hiện tại)
+        if len(self.feature_list) == 0 or len(self.feature_mat) == 0:
+            all_inputs = []
+            for _, inputs, _ in train_loader:
+                all_inputs.append(inputs)
+            all_inputs = torch.cat(all_inputs).to(device)
+            with torch.no_grad():
+                rep_mats = get_representation_matrix_ResNet18(self._network, device, all_inputs)
+            thr = [0.97] * len(rep_mats)
+            self.feature_list = update_GPM(self._network, rep_mats, threshold=thr, feature_list=None)
+            self.feature_mat  = build_feature_projections(self.feature_list, device)
+
+        self._network.train()
+        for epoch in range(epochs):
+            for _, inputs, targets in train_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                optimizer.zero_grad()
+                out = self._network(inputs)["logits"]
+                # chỉ tối ưu các class mới
+                fake_targets = targets - self._known_classes
+                loss = criterion(out[:, self._known_classes:], fake_targets)
+                loss.backward()
+
+                # Gradient Projections — theo PGM tham chiếu:
+                kk = 0
+                for k, (name, params) in enumerate(self._network.named_parameters()):
+                    if params.grad is None:
+                        continue
+                    if len(params.size()) == 4:  # conv weights
+                        # flatten theo chiều out_channels: (C_out, C_in*k*k) để nhân với P [d,d]
+                        sz = params.grad.data.size(0)
+                        grad_view = params.grad.data.view(sz, -1)  # [C_out, D]
+                        P = self.feature_mat[kk]
+                        if P is not None:
+                            # g' = g - g P
+                            # (C_out,D) - (C_out,D) @ (D,D) = (C_out,D)
+                            grad_proj = grad_view - torch.mm(grad_view, P)
+                            params.grad.data.copy_(grad_proj.view_as(params.grad.data))
+                        kk += 1
+                    elif len(params.size()) == 1 and self._cur_task != 0:
+                        # zero bias để tránh drift
+                        params.grad.data.zero_()
+
+                optimizer.step()
+            scheduler.step()
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
@@ -467,43 +565,6 @@ class LwF(BaseLearner):
                 )
             prog_bar.set_description(info)
         logging.info(info)
-    def train_projected(self, train_loader, test_loader, optimizer, scheduler):
-        """
-        Train backbone with Gradient Projection Method (GPM).
-        Assumes self._projectors is a list of projection matrices for past tasks.
-        """
-        prog_bar = tqdm(range(epochs), desc=f"Projected Training Task {self._cur_task}")
-        for _, epoch in enumerate(prog_bar):
-            self._network.train()
-            losses = 0.0
-            correct, total = 0, 0
-            for _, (_, inputs, targets) in enumerate(train_loader):
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-                logits = self._network(inputs)["logits"]
-                fake_targets = targets - self._known_classes
-                loss = F.cross_entropy(logits[:, self._known_classes:], fake_targets)
-
-                optimizer.zero_grad()
-                loss.backward()
-
-                # ===== Gradient Projection =====
-                with torch.no_grad():
-                    for name, p in self._network.named_parameters():
-                        if p.grad is not None and "fc" not in name:
-                            grad = p.grad.data
-                            for P in self._projectors:  # chiếu grad lên không gian orthogonal
-                                grad = grad - P @ (P.t() @ grad.view(-1, 1)).view_as(p)
-                            p.grad.data.copy_(grad)
-
-                optimizer.step()
-                losses += loss.item()
-                _, preds = torch.max(logits, dim=1)
-                correct += preds.eq(targets).cpu().sum()
-                total += len(targets)
-
-            scheduler.step()
-            acc = np.around(tensor2numpy(correct) * 100 / total, 2)
-            prog_bar.set_postfix(loss=losses / len(train_loader), acc=acc)
 
 #=====================================================================================
 def compute_fisher_matrix_diag(args, model, device, optimizer, x, y, task_id, **kwargs):
