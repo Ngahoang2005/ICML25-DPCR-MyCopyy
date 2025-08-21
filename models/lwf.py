@@ -388,6 +388,9 @@ class LwF(BaseLearner):
             all_inputs = torch.cat(all_inputs).to(self._device)
             with torch.no_grad():
                 if not hasattr(self._network, "act"):
+                    print("===== MODEL STRUCTURE =====")
+                    print(self._network)
+                    print("===========================")
                     attach_hooks(self._network)
                 rep_mats = get_representation_matrix_ResNet18(self._network, self._device, all_inputs)
             thr = [0.97] * len(rep_mats)
