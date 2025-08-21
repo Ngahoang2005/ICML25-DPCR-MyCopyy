@@ -159,62 +159,32 @@ def get_representation_matrix_ResNet18(model, device, x, y=None, nsamples=100):
 
 # ---- update_GPM (giữ nguyên logic SVD) ----
 def update_GPM(model, mat_list, threshold, feature_list=None):
-    """
-    Cập nhật feature basis (U) từ mat_list.
-    threshold: list hoặc scalar tỷ lệ năng lượng (ví dụ 0.97)
-    """
     if feature_list is None:
         feature_list = []
-
-    # ensure threshold list
-    if np.isscalar(threshold):
-        threshold = [threshold] * len(mat_list)
 
     if len(feature_list) == 0:
         for i in range(len(mat_list)):
             activation = mat_list[i]
             U, S, Vh = np.linalg.svd(activation, full_matrices=False)
             sval_total = (S**2).sum()
-            if sval_total <= 0:
-                feature_list.append(np.zeros((activation.shape[0], 0), dtype=np.float32))
-                continue
             sval_ratio = (S**2) / sval_total
-            r = int(np.sum(np.cumsum(sval_ratio) < threshold[i]))
-            feature_list.append(U[:, :r].astype(np.float32))
+            r = np.sum(np.cumsum(sval_ratio) < threshold[i])
+            # lưu U (d, r) — d = số chiều của patch flatten
+            feature_list.append(U[:, :r])
     else:
         for i in range(len(mat_list)):
             activation = mat_list[i]
-            U1, S1, Vh1 = np.linalg.svd(activation, full_matrices=False)
-            sval_total = (S1**2).sum()
             Ui_old = feature_list[i]
-            if Ui_old.size == 0:
-                act_hat = activation
-            else:
-                act_hat = activation - Ui_old @ (Ui_old.T @ activation)
+            act_hat = activation - Ui_old @ (Ui_old.T @ activation)
             U, S, Vh = np.linalg.svd(act_hat, full_matrices=False)
-            if sval_total <= 0:
-                continue
-            sval_hat = (S**2).sum()
+            sval_total = (S**2).sum()
             sval_ratio = (S**2) / sval_total
-            accumulated_sval = (sval_total - sval_hat) / sval_total
-
-            r = 0
-            for ii in range(sval_ratio.shape[0]):
-                if accumulated_sval < threshold[i]:
-                    accumulated_sval += sval_ratio[ii]
-                    r += 1
-                else:
-                    break
-            if r == 0:
-                continue
-            Ui = np.hstack((feature_list[i], U[:, :r]))
-            if Ui.shape[1] > Ui.shape[0]:
-                feature_list[i] = Ui[:, : Ui.shape[0]]
-            else:
-                feature_list[i] = Ui.astype(np.float32)
+            accumulated_sval = (S**2).cumsum() / sval_total
+            r = np.sum(accumulated_sval < threshold[i])
+            if r > 0:
+                Ui = np.hstack((Ui_old, U[:, :r]))
+                feature_list[i] = Ui[:, : min(Ui.shape)]
     return feature_list
-
-
 # ---- build P = U U^T để chiếu gradient ----
 def build_feature_projections(feature_list, device):
     proj_list = []
@@ -226,6 +196,7 @@ def build_feature_projections(feature_list, device):
         P = Ut @ Ut.t()  # [d, d]
         proj_list.append(P)
     return proj_list
+
 
 init_epoch = 2 
 init_lr = 0.1 
@@ -628,15 +599,13 @@ class LwF(BaseLearner):
                     if params.grad is None:
                         continue
                     if params.dim() == 4:  # conv weight: (out_ch, in_ch, k, k)
-                        grad_view = params.grad.data.view(params.grad.data.size(0), -1)  # [C_out, D]
-                        P = None
-                        if kk < len(self.feature_mat):
-                            P = self.feature_mat[kk]
-                        if P is not None:
-                        # g' = g - g P
-                            grad_proj = grad_view - torch.mm(grad_view, P)
+                        grad_vec = params.grad.data.view(-1, 1)   # [N,1]
+                        P = self.feature_mat[kk]                  # [N,N]
+                        if P is not None and P.shape[0] == grad_vec.shape[0]:
+                            grad_proj = grad_vec - P @ (P @ grad_vec)  # g' = g - PPg
                             params.grad.data.copy_(grad_proj.view_as(params.grad.data))
                         kk += 1
+
                     elif params.dim() == 1 and self._cur_task != 0:
                     # zero biases for non-first task
                         params.grad.data.zero_()
