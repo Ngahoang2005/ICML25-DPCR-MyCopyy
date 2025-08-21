@@ -19,7 +19,40 @@ from utils.autoaugment import CIFAR10Policy
 import numpy as np
 import torch
 import torch.nn.functional as F
+def attach_hooks(model):
+    """
+    Gắn forward hook vào tất cả conv layers của ResNet18 backbone.
+    Lưu activation vào model.act[name].
+    """
+    model.act = {}
 
+    def get_activation(name):
+        def hook(_model, _input, output):
+            model.act[name] = output.detach()
+        return hook
+
+    # Conv đầu vào
+    model.conv1.register_forward_hook(get_activation("conv_in"))
+
+    # Layer1
+    for i, block in enumerate(model.layer1):
+        block.conv1.register_forward_hook(get_activation(f"layer1_{i}_conv_0"))
+        block.conv2.register_forward_hook(get_activation(f"layer1_{i}_conv_1"))
+
+    # Layer2
+    for i, block in enumerate(model.layer2):
+        block.conv1.register_forward_hook(get_activation(f"layer2_{i}_conv_0"))
+        block.conv2.register_forward_hook(get_activation(f"layer2_{i}_conv_1"))
+
+    # Layer3
+    for i, block in enumerate(model.layer3):
+        block.conv1.register_forward_hook(get_activation(f"layer3_{i}_conv_0"))
+        block.conv2.register_forward_hook(get_activation(f"layer3_{i}_conv_1"))
+
+    # Layer4
+    for i, block in enumerate(model.layer4):
+        block.conv1.register_forward_hook(get_activation(f"layer4_{i}_conv_0"))
+        block.conv2.register_forward_hook(get_activation(f"layer4_{i}_conv_1"))
 def compute_conv_output_size(imgsize, kernel_size, stride=1, pad=0):
     return int(np.floor((imgsize + 2 * pad - kernel_size) / stride) + 1)
 
@@ -354,6 +387,8 @@ class LwF(BaseLearner):
             # ==== PGM: khởi tạo feature_list từ Task 0 ====
             all_inputs = torch.cat(all_inputs).to(self._device)
             with torch.no_grad():
+                if not hasattr(self._network, "act"):
+                    attach_hooks(self._network)
                 rep_mats = get_representation_matrix_ResNet18(self._network, self._device, all_inputs)
             thr = [0.97] * len(rep_mats)
             self.feature_list = update_GPM(self._network, rep_mats, threshold=thr, feature_list=None)
@@ -430,6 +465,8 @@ class LwF(BaseLearner):
 
                 # ====== Cập nhật GPM sau khi hoàn thành task (từ dữ liệu hiện tại) ======
                 with torch.no_grad():
+                    if not hasattr(self._network, "act"):
+                        attach_hooks(self._network)
                     rep_mats = get_representation_matrix_ResNet18(self._network, self._device, all_inputs)
                 thr = [0.97] * len(rep_mats)
                 self.feature_list = update_GPM(self._network, rep_mats, threshold=thr, feature_list=self.feature_list)
@@ -544,6 +581,8 @@ class LwF(BaseLearner):
                 all_inputs.append(inputs)
             all_inputs = torch.cat(all_inputs).to(device)
             with torch.no_grad():
+                if not hasattr(self._network, "act"):
+                    attach_hooks(self._network)
                 rep_mats = get_representation_matrix_ResNet18(self._network, device, all_inputs)
             thr = [0.97] * len(rep_mats)
             self.feature_list = update_GPM(self._network, rep_mats, threshold=thr, feature_list=None)
