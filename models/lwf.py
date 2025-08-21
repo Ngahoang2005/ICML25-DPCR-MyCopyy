@@ -767,9 +767,10 @@ def get_representation_matrix_ResNet18(net, device, x, y=None):
             ksz = 3
         bsz = batch_list[i]
         st = stride_list[i]
+        C = act_list[i].shape[1]
         k = 0
         s = compute_conv_output_size(map_list[i], ksz, stride_list[i], pad)
-        mat = np.zeros((ksz * ksz * in_channel[i], s * s * bsz))
+        mat = np.zeros((ksz * ksz * C, s * s * bsz))
         act = F.pad(act_list[i], p1d, "constant", 0).detach().cpu().numpy()
         for kk in range(bsz):
             for ii in range(s):
@@ -782,6 +783,8 @@ def get_representation_matrix_ResNet18(net, device, x, y=None):
             k = 0
             s = compute_conv_output_size(map_list[i], 1, stride_list[i])
             mat = np.zeros((1 * 1 * in_channel[i], s * s * bsz))
+            C = act_list[i].shape[1]  # số channel thật
+            mat = np.zeros((1 * 1 * C, s * s * bsz))
             act = act_list[i].detach().cpu().numpy()
             for kk in range(bsz):
                 for ii in range(s):
