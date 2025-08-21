@@ -157,7 +157,7 @@ class LwF(BaseLearner):
         if len(self._multiple_gpus) > 1:
             self._network = self._network.module
 
-        def _train(self, train_loader, test_loader):
+    def _train(self, train_loader, test_loader):
         resume = self.args['resume']  # set resume=True to use saved checkpoints
         optimizer = None
         if self._cur_task == 0:
