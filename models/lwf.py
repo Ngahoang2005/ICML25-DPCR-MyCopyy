@@ -130,19 +130,16 @@ class LwF(BaseLearner):
 
     def after_task(self, test_loader=None):
         """
-        Gọi sau khi train xong mỗi task.
-        - Lưu lại teacher network (old_network) bằng state_dict.
+        Sau khi train xong một task:
+        - Lưu teacher network bằng copy().freeze().
         - Cập nhật số lớp đã biết.
         - Đánh giá test accuracy và forgetting.
         - Lưu checkpoint.
         """
 
-        # ----- Clone old network (không dùng deepcopy) -----
-        self._old_network = self._init_network(self.args)   # khởi tạo kiến trúc giống hệt
-        self._old_network.load_state_dict(self._network.state_dict())
+        # ----- Clone old network -----
+        self._old_network = self._network.copy().freeze()
         self._old_network.eval()
-        for p in self._old_network.parameters():
-            p.requires_grad = False
 
         # ----- Cập nhật số lớp đã biết -----
         self._known_classes = self._total_classes
@@ -151,7 +148,7 @@ class LwF(BaseLearner):
         if test_loader is not None:
             test_acc = self._compute_accuracy(self._network, test_loader)
 
-            # lần đầu thì append, lần sau thì update
+            # init list nếu lần đầu gọi
             if not hasattr(self, "acc_per_task"):
                 self.acc_per_task = []
                 self.best_acc_per_task = []
@@ -161,9 +158,10 @@ class LwF(BaseLearner):
                 self.best_acc_per_task.append(test_acc)
             else:
                 self.acc_per_task[self._cur_task] = test_acc
-                self.best_acc_per_task[self._cur_task] = max(self.best_acc_per_task[self._cur_task], test_acc)
+                self.best_acc_per_task[self._cur_task] = max(
+                    self.best_acc_per_task[self._cur_task], test_acc
+                )
 
-            # Tính forgetting
             forgetting = self.compute_forgetting(self._cur_task)
 
             print(f"[After Task {self._cur_task}] "
