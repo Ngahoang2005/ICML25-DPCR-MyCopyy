@@ -128,30 +128,31 @@ class LwF(BaseLearner):
         self.best_acc_per_task = []  # list lưu best acc đạt được tại lúc kết thúc từng task
 
 
+    from utils.inc_net import CosineIncrementalNet
+
     def after_task(self, test_loader=None):
-        """
-        Sau khi train xong một task:
-        - Lưu teacher network bằng copy().freeze().
-        - Cập nhật số lớp đã biết.
-        - Đánh giá test accuracy và forgetting.
-        - Lưu checkpoint.
-        """
+        # Tạo một mạng mới với kiến trúc giống hệt
+        self._old_network = CosineIncrementalNet(
+            self.args,
+            pretrained=False,   # không load pretrained nữa
+            nb_proxy=self._network.nb_proxy
+        ).to(self.device)
 
-        # ----- Clone old network -----
-        self._old_network = self._network.copy().freeze()
+        # Copy trọng số từ mạng hiện tại
+        self._old_network.load_state_dict(self._network.state_dict())
         self._old_network.eval()
+        for p in self._old_network.parameters():
+            p.requires_grad = False
 
-        # ----- Cập nhật số lớp đã biết -----
+        # Cập nhật số lớp đã biết
         self._known_classes = self._total_classes
 
-        # ----- Evaluate -----
+        # Evaluate sau task
         if test_loader is not None:
             test_acc = self._compute_accuracy(self._network, test_loader)
 
-            # init list nếu lần đầu gọi
             if not hasattr(self, "acc_per_task"):
-                self.acc_per_task = []
-                self.best_acc_per_task = []
+                self.acc_per_task, self.best_acc_per_task = [], []
 
             if len(self.acc_per_task) < self._cur_task + 1:
                 self.acc_per_task.append(test_acc)
@@ -167,7 +168,7 @@ class LwF(BaseLearner):
             print(f"[After Task {self._cur_task}] "
                 f"Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
 
-        # ----- Save checkpoint -----
+        # Lưu checkpoint
         if not self.args['resume']:
             if not os.path.exists(self.args["model_dir"]):
                 os.makedirs(self.args["model_dir"])
@@ -175,13 +176,13 @@ class LwF(BaseLearner):
 
 
 
-    def compute_forgetting(self, task_id):
-        forgetting = []
-        for i in range(task_id):
-            best_acc = self.best_acc_per_task[i]
-            current_acc = self.acc_per_task[i]
-            forgetting.append(best_acc - current_acc)
-        return np.mean(forgetting) if forgetting else 0.0
+        def compute_forgetting(self, task_id):
+            forgetting = []
+            for i in range(task_id):
+                best_acc = self.best_acc_per_task[i]
+                current_acc = self.acc_per_task[i]
+                forgetting.append(best_acc - current_acc)
+            return np.mean(forgetting) if forgetting else 0.0
 
 
     def incremental_train(self, data_manager):
