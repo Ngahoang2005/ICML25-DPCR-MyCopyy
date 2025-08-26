@@ -367,7 +367,7 @@ class LwF(BaseLearner):
 
 
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
-        prog_bar = tqdm(range(self.epochs))
+        prog_bar = tqdm(range(epochs))
         for epoch in prog_bar:
             self._network.train()
             losses = 0.0
@@ -418,7 +418,7 @@ class LwF(BaseLearner):
 
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
-            prog_bar.set_description(f"Task {self._cur_task}, Epoch {epoch+1}/{self.epochs}, Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
+            prog_bar.set_description(f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
 
 
     # SVD for calculating the W_c
