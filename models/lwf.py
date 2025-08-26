@@ -131,36 +131,13 @@ class LwF(BaseLearner):
 
     from utils.inc_net import CosineIncrementalNet
 
-    def after_task(self, test_loader):
-        # copy teacher network
+    def after_task(self):
         self._old_network = self._network.copy().freeze()
-        self._old_network.to(self._device)
-
-        # ---- Tính accuracy cho từng task ----
-        acc_matrix = []
-        for task_id in range(self._cur_task + 1):
-            acc = self._compute_accuracy(self._network, test_loader)   # thống nhất gọi với self._network
-            acc_matrix.append(acc)
-            print(f"Task {self._cur_task} → Test Accuracy on Task {task_id}: {acc:.2f}%")
-
-        # lưu best acc cho task hiện tại
-        self.acc_per_task.append(acc_matrix[-1])
-        self.best_acc_per_task.append(max(acc_matrix))
-
-        # ---- Forgetting ----
-        forgetting_scores = []
-        for task_id in range(self._cur_task):
-            prev_best = self.best_acc_per_task[task_id]
-            current_acc = acc_matrix[task_id]
-            forgetting = prev_best - current_acc
-            forgetting_scores.append(forgetting)
-            print(f"Forgetting on Task {task_id}: {forgetting:.2f}%")
-
-        avg_forgetting = sum(forgetting_scores) / len(forgetting_scores) if forgetting_scores else 0
-        print(f"===> Average Forgetting after Task {self._cur_task}: {avg_forgetting:.2f}%")
-
-        # ---- Lưu history ----
-        self.acc_history.append(acc_matrix)
+        self._known_classes = self._total_classes
+        if not self.args['resume']:
+            if not os.path.exists(self.args["model_dir"]):
+                os.makedirs(self.args["model_dir"])
+            self.save_checkpoint("{}".format(self.args["model_dir"]))
 
     def compute_forgetting(self, task_id):
         forgetting = []
@@ -275,7 +252,13 @@ class LwF(BaseLearner):
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
             self._build_protos()
-            self.after_task(test_loader)
+            test_acc = self._compute_accuracy(self._network, test_loader)
+            self.acc_per_task.append(test_acc)
+            self.best_acc_per_task.append(test_acc)
+            forgetting = self.compute_forgetting(self._cur_task)
+            print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
+
+            
 
         else:
             resume = self.args['resume']
@@ -349,7 +332,11 @@ class LwF(BaseLearner):
                 Delta = R_inv @ self.al_classifier.Q
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
-            self.after_task(test_loader)
+            test_acc = self._compute_accuracy(self._network, test_loader)
+            self.acc_per_task.append(test_acc)
+            self.best_acc_per_task.append(max(self.best_acc_per_task[-1], test_acc))
+            forgetting = self.compute_forgetting(self._cur_task)
+            print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
 
 
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
