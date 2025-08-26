@@ -123,14 +123,49 @@ class LwF(BaseLearner):
             self._projectors = []
         self._old_network = None
         self.ipt_score = IPTScore(self._network)
-    def after_task(self):
-        self._old_network = self._network.copy().freeze()
+        self.T = args.get("T", 2.0)
+        self.acc_per_task = []  # list lưu accuracy mỗi task
+        self.best_acc_per_task = []  # list lưu best acc đạt được tại lúc kết thúc từng task
+
+
+    def after_task(self, test_loader=None):
+        # freeze old network
+        import copy
+        self._old_network = copy.deepcopy(self._network)
+        self._old_network.eval()
+        for p in self._old_network.parameters():
+            p.requires_grad = False
+
         self._known_classes = self._total_classes
+
+        # ---- Evaluate on test set ----
+        if test_loader is not None:
+            test_acc = self._compute_accuracy(self._network, test_loader)
+            if len(self.acc_per_task) < self._cur_task + 1:
+                self.acc_per_task.append(test_acc)
+                self.best_acc_per_task.append(test_acc)
+            else:
+                self.acc_per_task[self._cur_task] = test_acc
+                self.best_acc_per_task[self._cur_task] = max(self.best_acc_per_task[self._cur_task], test_acc)
+
+            forgetting = self.compute_forgetting(self._cur_task)
+            print(f"[After Task {self._cur_task}] Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
+
+        # ---- Save checkpoint ----
         if not self.args['resume']:
             if not os.path.exists(self.args["model_dir"]):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
-        
+
+
+    def compute_forgetting(self, task_id):
+        forgetting = []
+        for i in range(task_id):
+            best_acc = self.best_acc_per_task[i]
+            current_acc = self.acc_per_task[i]
+            forgetting.append(best_acc - current_acc)
+        return np.mean(forgetting) if forgetting else 0.0
+
 
     def incremental_train(self, data_manager):
         self.data_manager = data_manager
@@ -355,7 +390,9 @@ class LwF(BaseLearner):
                 loss_inner.backward(retain_graph=True)
                 optimizer.step()
 
-                delta_in = [p.detach() - theta_t[n] for n, p in self._network.named_parameters()]
+                #delta_in = [p.detach() - theta_t[n] for n, p in self._network.named_parameters()]
+                delta_in = [p.detach() - theta_t[name] for name, p in self._network.named_parameters()]
+
 
                 # ---------------- OUTER LOOP ----------------
                 with torch.no_grad():
