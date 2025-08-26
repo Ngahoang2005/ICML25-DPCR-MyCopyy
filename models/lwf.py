@@ -126,57 +126,42 @@ class LwF(BaseLearner):
         self.T = args.get("T", 2.0)
         self.acc_per_task = []  # list lưu accuracy mỗi task
         self.best_acc_per_task = []  # list lưu best acc đạt được tại lúc kết thúc từng task
+        self.acc_history = []
 
 
     from utils.inc_net import CosineIncrementalNet
 
-    def after_task(self, test_loader=None):
-        """
-        Sau khi train xong 1 task:
-        - tạo teacher bằng init mới + load_state_dict (không deepcopy)
-        - freeze teacher
-        - cập nhật self._known_classes
-        - evaluate & tính forgetting (nếu test_loader được truyền)
-        - lưu checkpoint
-        """
-
-        # Tạo mạng mới cùng kiến trúc (CosineIncrementalNet hoặc IncrementalNet)
-        if isinstance(self._network, CosineIncrementalNet):
-            # CosineIncrementalNet(args, pretrained, nb_proxy)
-            self._old_network = CosineIncrementalNet(self.args, False, self._network.nb_proxy)
-        else:
-            # IncrementalNet signature: (args, pretrained)
-            self._old_network = IncrementalNet(self.args, False)
-
-        # copy weights
-        self._old_network.load_state_dict(self._network.state_dict())
+    def after_task(self, test_loader):
+        # copy teacher network
+        self._old_network = self._network.copy().freeze()
         self._old_network.to(self._device)
-        self._old_network.eval()
-        for p in self._old_network.parameters():
-            p.requires_grad = False
 
-        # update known classes
-        self._known_classes = self._total_classes
+        # ---- Tính accuracy cho từng task ----
+        acc_matrix = []
+        for task_id in range(self._cur_task + 1):
+            acc = self._compute_accuracy(self._network, test_loader)   # thống nhất gọi với self._network
+            acc_matrix.append(acc)
+            print(f"Task {self._cur_task} → Test Accuracy on Task {task_id}: {acc:.2f}%")
 
-        # Evaluate and record accuracy/forgetting
-        if test_loader is not None:
-            test_acc = self._compute_accuracy(self._network, test_loader)
+        # lưu best acc cho task hiện tại
+        self.acc_per_task.append(acc_matrix[-1])
+        self.best_acc_per_task.append(max(acc_matrix))
 
-            if len(self.acc_per_task) < self._cur_task + 1:
-                self.acc_per_task.append(test_acc)
-                self.best_acc_per_task.append(test_acc)
-            else:
-                self.acc_per_task[self._cur_task] = test_acc
-                self.best_acc_per_task[self._cur_task] = max(self.best_acc_per_task[self._cur_task], test_acc)
+        # ---- Forgetting ----
+        forgetting_scores = []
+        for task_id in range(self._cur_task):
+            prev_best = self.best_acc_per_task[task_id]
+            current_acc = acc_matrix[task_id]
+            forgetting = prev_best - current_acc
+            forgetting_scores.append(forgetting)
+            print(f"Forgetting on Task {task_id}: {forgetting:.2f}%")
 
-            forgetting = self.compute_forgetting(self._cur_task)
-            print(f"[After Task {self._cur_task}] Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
+        avg_forgetting = sum(forgetting_scores) / len(forgetting_scores) if forgetting_scores else 0
+        print(f"===> Average Forgetting after Task {self._cur_task}: {avg_forgetting:.2f}%")
 
-        # Save checkpoint
-        if not self.args.get('resume', False):
-            if not os.path.exists(self.args["model_dir"]):
-                os.makedirs(self.args["model_dir"])
-            self.save_checkpoint("{}".format(self.args["model_dir"]))
+        # ---- Lưu history ----
+        self.acc_history.append(acc_matrix)
+
     def compute_forgetting(self, task_id):
         forgetting = []
         for i in range(task_id):
@@ -475,6 +460,18 @@ class LwF(BaseLearner):
                 self._covs.append(torch.tensor(cov).to(self._device))
                 self._projectors.append(self.get_projector_svd(self._covs[class_idx]))
 
+    def _compute_accuracy(self, model, data_loader):
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for _, inputs, targets in data_loader:
+                inputs, targets = inputs.to(self._device), targets.to(self._device)
+                outputs = model(inputs)["logits"]   # forward backbone
+                preds = torch.argmax(outputs, dim=1)
+                correct += preds.eq(targets).sum().item()
+                total += targets.size(0)
+        acc = 100.0 * correct / total if total > 0 else 0.0
+        return acc
 
     def _init_train(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(init_epoch))
