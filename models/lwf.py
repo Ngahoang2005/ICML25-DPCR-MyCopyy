@@ -83,7 +83,7 @@ class LwF(BaseLearner):
     def __init__(self, args):
         super().__init__(args)
         self.args = args
-        self.ipt_score = IPTScore(self._network)
+    
         if self.args["dataset"] == "imagenet100" or self.args["dataset"] == "imagenet1000":
             epochs = 100
             lrate = 0.05
@@ -121,7 +121,8 @@ class LwF(BaseLearner):
         if self.args["DPCR"]:
             self._covs = []
             self._projectors = []
-
+        self._old_network = None
+        self.ipt_score = IPTScore(self._network)
     def after_task(self):
         self._old_network = self._network.copy().freeze()
         self._known_classes = self._total_classes
