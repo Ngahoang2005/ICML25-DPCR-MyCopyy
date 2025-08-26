@@ -271,6 +271,8 @@ class LwF(BaseLearner):
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
             self._build_protos()
+            self.after_task(test_loader)
+
         else:
             resume = self.args['resume']
             if resume:
@@ -343,6 +345,7 @@ class LwF(BaseLearner):
                 Delta = R_inv @ self.al_classifier.Q
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+            self.after_task(test_loader)
 
 
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
