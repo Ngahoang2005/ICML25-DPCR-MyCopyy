@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 200
+init_epoch = 2 
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100
+epochs = 2
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -454,62 +454,6 @@ class LwF(BaseLearner):
                 )
             prog_bar.set_description(info)
 
-        logging.info(info)
-
-    def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
-
-        prog_bar = tqdm(range(epochs))
-        for _, epoch in enumerate(prog_bar):
-            self._network.train()
-            losses = 0.0
-            correct, total = 0, 0
-            for i, (_, inputs, targets) in enumerate(train_loader):
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-                logits = self._network(inputs)["logits"]
-
-                fake_targets = targets - self._known_classes
-                loss_clf = F.cross_entropy(
-                    logits[:, self._known_classes :], fake_targets
-                )
-                loss_kd = _KD_loss(
-                    logits[:, : self._known_classes],
-                    self._old_network(inputs)["logits"],
-                    T,
-                )
-
-                loss = lamda * loss_kd + loss_clf
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                losses += loss.item()
-
-                with torch.no_grad():
-                    _, preds = torch.max(logits, dim=1)
-                    correct += preds.eq(targets.expand_as(preds)).cpu().sum()
-                    total += len(targets)
-
-            scheduler.step()
-            train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
-            if epoch % 25 == 0:
-                test_acc = self._compute_accuracy(self._network, test_loader)
-                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}".format(
-                    self._cur_task,
-                    epoch + 1,
-                    epochs,
-                    losses / len(train_loader),
-                    train_acc,
-                    test_acc,
-                )
-            else:
-                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}".format(
-                    self._cur_task,
-                    epoch + 1,
-                    epochs,
-                    losses / len(train_loader),
-                    train_acc,
-                )
-            prog_bar.set_description(info)
         logging.info(info)
 
 def _KD_loss(pred, soft, T):
