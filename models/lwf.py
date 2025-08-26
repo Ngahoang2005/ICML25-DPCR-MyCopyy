@@ -434,6 +434,7 @@ class LwF(BaseLearner):
                 f"Loss {losses/max(1,len(train_loader)):.3f}, Train_acc {train_acc:.2f}"
             )
 
+
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
