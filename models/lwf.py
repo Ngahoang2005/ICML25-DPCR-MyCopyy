@@ -343,7 +343,6 @@ class LwF(BaseLearner):
         inner_mask = self.ipt_score.calculate_score_inner(metric="ipt")
         outer_mask = self.ipt_score.calculate_score_outer(metric="ipt")
 
-        # ensure masks on same device as params
         for k in inner_mask:
             inner_mask[k] = inner_mask[k].to(self._device)
             outer_mask[k] = outer_mask[k].to(self._device)
@@ -361,8 +360,8 @@ class LwF(BaseLearner):
             outer[both_zero] = 0.5
 
         with torch.no_grad():
-            for (name, p), delta_in_p, delta_out_p in zip(self._network.named_parameters(), delta_in, delta_out):
-                updated = theta_t[name] + inner_mask[name] * delta_in_p + outer_mask[name] * delta_out_p
+            for name, p in self._network.named_parameters():
+                updated = theta_t[name] + inner_mask[name] * delta_in[name] + outer_mask[name] * delta_out[name]
                 p.copy_(updated)
 
 
@@ -376,35 +375,48 @@ class LwF(BaseLearner):
             # lưu tham số gốc theta_t
             theta_t = {name: p.clone().detach() for name, p in self._network.named_parameters()}
 
-            step_count = 0
-            for i, (_, inputs, targets) in enumerate(train_loader):
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
+            data_iter = iter(train_loader)
 
-                # === INNER ===
-                student_outputs = self._network(inputs)["logits"]
-                fake_targets = targets - self._known_classes
-                loss_inner = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
+            for cycle in range(32):   # lặp 32 lần
+                # === 8 bước INNER ===
+                for _ in range(8):
+                    try:
+                        _, inputs, targets = next(data_iter)
+                    except StopIteration:
+                        data_iter = iter(train_loader)
+                        _, inputs, targets = next(data_iter)
 
-                optimizer.zero_grad()
-                loss_inner.backward(retain_graph=True)
-                optimizer.step()
+                    inputs, targets = inputs.to(self._device), targets.to(self._device)
 
-                # delta_in
-                delta_in = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
+                    student_outputs = self._network(inputs)["logits"]
+                    fake_targets = targets - self._known_classes
+                    loss_inner = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
 
-                losses += loss_inner.item()
+                    optimizer.zero_grad()
+                    loss_inner.backward(retain_graph=True)
+                    optimizer.step()
 
-                with torch.no_grad():
-                    _, preds = torch.max(student_outputs, dim=1)
-                    correct += preds.eq(targets).cpu().sum().item()
-                    total += targets.size(0)
+                    # delta_in
+                    delta_in = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
 
-                step_count += 1
+                    losses += loss_inner.item()
+                    with torch.no_grad():
+                        _, preds = torch.max(student_outputs, dim=1)
+                        correct += preds.eq(targets).cpu().sum().item()
+                        total += targets.size(0)
 
-                # === OUTER sau mỗi 4 inner step ===
-                if step_count % 4 == 0:
+                # === 4 bước OUTER ===
+                for _ in range(4):
+                    try:
+                        _, inputs, targets = next(data_iter)
+                    except StopIteration:
+                        data_iter = iter(train_loader)
+                        _, inputs, targets = next(data_iter)
+
+                    inputs, targets = inputs.to(self._device), targets.to(self._device)
+
                     if self._old_network is None:
-                        raise RuntimeError("No teacher network available for outer loop KD (self._old_network is None). Call after_task() at end of previous task.")
+                        raise RuntimeError("No teacher network for KD")
                     with torch.no_grad():
                         teacher_outputs = self._old_network(inputs)["logits"]
 
@@ -423,16 +435,13 @@ class LwF(BaseLearner):
 
                     losses += kd_loss.item()
 
-                # chỉ lặp (4 inner + 1 outer) đúng 3 lần
-                if step_count >= 4 * 3:  
-                    break
-
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
             prog_bar.set_description(
                 f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, "
                 f"Loss {losses/max(1,len(train_loader)):.3f}, Train_acc {train_acc:.2f}"
             )
+
 
 
     # SVD for calculating the W_c
