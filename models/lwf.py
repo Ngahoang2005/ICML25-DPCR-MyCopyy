@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 20
+init_epoch = 2
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20
+epochs = 2
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -129,18 +129,33 @@ class LwF(BaseLearner):
 
 
     def after_task(self, test_loader=None):
-        # freeze old network
-        import copy
-        self._old_network = copy.deepcopy(self._network)
+        """
+        Gọi sau khi train xong mỗi task.
+        - Lưu lại teacher network (old_network) bằng state_dict.
+        - Cập nhật số lớp đã biết.
+        - Đánh giá test accuracy và forgetting.
+        - Lưu checkpoint.
+        """
+
+        # ----- Clone old network (không dùng deepcopy) -----
+        self._old_network = self._init_network(self.args)   # khởi tạo kiến trúc giống hệt
+        self._old_network.load_state_dict(self._network.state_dict())
         self._old_network.eval()
         for p in self._old_network.parameters():
             p.requires_grad = False
 
+        # ----- Cập nhật số lớp đã biết -----
         self._known_classes = self._total_classes
 
-        # ---- Evaluate on test set ----
+        # ----- Evaluate -----
         if test_loader is not None:
             test_acc = self._compute_accuracy(self._network, test_loader)
+
+            # lần đầu thì append, lần sau thì update
+            if not hasattr(self, "acc_per_task"):
+                self.acc_per_task = []
+                self.best_acc_per_task = []
+
             if len(self.acc_per_task) < self._cur_task + 1:
                 self.acc_per_task.append(test_acc)
                 self.best_acc_per_task.append(test_acc)
@@ -148,14 +163,18 @@ class LwF(BaseLearner):
                 self.acc_per_task[self._cur_task] = test_acc
                 self.best_acc_per_task[self._cur_task] = max(self.best_acc_per_task[self._cur_task], test_acc)
 
+            # Tính forgetting
             forgetting = self.compute_forgetting(self._cur_task)
-            print(f"[After Task {self._cur_task}] Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
 
-        # ---- Save checkpoint ----
+            print(f"[After Task {self._cur_task}] "
+                f"Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
+
+        # ----- Save checkpoint -----
         if not self.args['resume']:
             if not os.path.exists(self.args["model_dir"]):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
+
 
 
     def compute_forgetting(self, task_id):
