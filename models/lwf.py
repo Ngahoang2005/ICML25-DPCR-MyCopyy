@@ -366,7 +366,7 @@ class LwF(BaseLearner):
                 p.copy_(updated)
 
 
-    def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
+    def _update_representation(self, train_loader, test_loader, optimizer, scheduler): 
         prog_bar = tqdm(range(epochs))
         for epoch in prog_bar:
             self._network.train()
@@ -376,10 +376,11 @@ class LwF(BaseLearner):
             # lưu tham số gốc theta_t
             theta_t = {name: p.clone().detach() for name, p in self._network.named_parameters()}
 
+            step_count = 0
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
 
-                # INNER
+                # === INNER ===
                 student_outputs = self._network(inputs)["logits"]
                 fake_targets = targets - self._known_classes
                 loss_inner = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
@@ -389,37 +390,49 @@ class LwF(BaseLearner):
                 optimizer.step()
 
                 # delta_in
-                delta_in = [p.detach() - theta_t[name] for name, p in self._network.named_parameters()]
+                delta_in = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
 
-                # OUTER (KD) - require teacher
-                if self._old_network is None:
-                    raise RuntimeError("No teacher network available for outer loop KD (self._old_network is None). Call after_task() at end of previous task.")
-                with torch.no_grad():
-                    teacher_outputs = self._old_network(inputs)["logits"]
-
-                student_outputs = self._network(inputs)["logits"]
-                kd_loss = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
-
-                optimizer.zero_grad()
-                kd_loss.backward()
-                optimizer.step()
-
-                delta_out = [p.detach() - theta_t[name] for name, p in self._network.named_parameters()]
-
-                # TASK VECTOR UPDATE
-                self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out)
-
-                losses += (loss_inner.item() + kd_loss.item())
+                losses += loss_inner.item()
 
                 with torch.no_grad():
                     _, preds = torch.max(student_outputs, dim=1)
                     correct += preds.eq(targets).cpu().sum().item()
                     total += targets.size(0)
 
+                step_count += 1
+
+                # === OUTER sau mỗi 4 inner step ===
+                if step_count % 4 == 0:
+                    if self._old_network is None:
+                        raise RuntimeError("No teacher network available for outer loop KD (self._old_network is None). Call after_task() at end of previous task.")
+                    with torch.no_grad():
+                        teacher_outputs = self._old_network(inputs)["logits"]
+
+                    student_outputs = self._network(inputs)["logits"]
+                    kd_loss = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
+
+                    optimizer.zero_grad()
+                    kd_loss.backward()
+                    optimizer.step()
+
+                    # delta_out
+                    delta_out = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
+
+                    # TASK VECTOR UPDATE
+                    self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out)
+
+                    losses += kd_loss.item()
+
+                # chỉ lặp (4 inner + 1 outer) đúng 3 lần
+                if step_count >= 4 * 3:  
+                    break
+
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
-            prog_bar.set_description(f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
-
+            prog_bar.set_description(
+                f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, "
+                f"Loss {losses/max(1,len(train_loader)):.3f}, Train_acc {train_acc:.2f}"
+            )
 
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
