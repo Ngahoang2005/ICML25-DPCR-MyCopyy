@@ -131,58 +131,59 @@ class LwF(BaseLearner):
     from utils.inc_net import CosineIncrementalNet
 
     def after_task(self, test_loader=None):
-        # Tạo một mạng mới với kiến trúc giống hệt
-        self._old_network = CosineIncrementalNet(
-            self.args,
-            pretrained=False,   # không load pretrained nữa
-            nb_proxy=self._network.nb_proxy
-        ).to(self.device)
+        """
+        Sau khi train xong 1 task:
+        - tạo teacher bằng init mới + load_state_dict (không deepcopy)
+        - freeze teacher
+        - cập nhật self._known_classes
+        - evaluate & tính forgetting (nếu test_loader được truyền)
+        - lưu checkpoint
+        """
 
-        # Copy trọng số từ mạng hiện tại
+        # Tạo mạng mới cùng kiến trúc (CosineIncrementalNet hoặc IncrementalNet)
+        if isinstance(self._network, CosineIncrementalNet):
+            # CosineIncrementalNet(args, pretrained, nb_proxy)
+            self._old_network = CosineIncrementalNet(self.args, False, self._network.nb_proxy)
+        else:
+            # IncrementalNet signature: (args, pretrained)
+            self._old_network = IncrementalNet(self.args, False)
+
+        # copy weights
         self._old_network.load_state_dict(self._network.state_dict())
+        self._old_network.to(self._device)
         self._old_network.eval()
         for p in self._old_network.parameters():
             p.requires_grad = False
 
-        # Cập nhật số lớp đã biết
+        # update known classes
         self._known_classes = self._total_classes
 
-        # Evaluate sau task
+        # Evaluate and record accuracy/forgetting
         if test_loader is not None:
             test_acc = self._compute_accuracy(self._network, test_loader)
-
-            if not hasattr(self, "acc_per_task"):
-                self.acc_per_task, self.best_acc_per_task = [], []
 
             if len(self.acc_per_task) < self._cur_task + 1:
                 self.acc_per_task.append(test_acc)
                 self.best_acc_per_task.append(test_acc)
             else:
                 self.acc_per_task[self._cur_task] = test_acc
-                self.best_acc_per_task[self._cur_task] = max(
-                    self.best_acc_per_task[self._cur_task], test_acc
-                )
+                self.best_acc_per_task[self._cur_task] = max(self.best_acc_per_task[self._cur_task], test_acc)
 
             forgetting = self.compute_forgetting(self._cur_task)
+            print(f"[After Task {self._cur_task}] Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
 
-            print(f"[After Task {self._cur_task}] "
-                f"Test Accuracy: {test_acc:.2f}% | Forgetting: {forgetting:.2f}%")
-
-        # Lưu checkpoint
-        if not self.args['resume']:
+        # Save checkpoint
+        if not self.args.get('resume', False):
             if not os.path.exists(self.args["model_dir"]):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
-
-
-
-        def compute_forgetting(self, task_id):
-            forgetting = []
-            for i in range(task_id):
-                best_acc = self.best_acc_per_task[i]
-                current_acc = self.acc_per_task[i]
-                forgetting.append(best_acc - current_acc)
-            return np.mean(forgetting) if forgetting else 0.0
+    def compute_forgetting(self, task_id):
+        forgetting = []
+        for i in range(task_id):
+            best_acc = self.best_acc_per_task[i]
+            current_acc = self.acc_per_task[i]
+            forgetting.append(best_acc - current_acc)
+        return np.mean(forgetting) if forgetting else 0.0
 
 
     def incremental_train(self, data_manager):
@@ -369,10 +370,14 @@ class LwF(BaseLearner):
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
         inner_mask = self.ipt_score.calculate_score_inner(metric="ipt")
         outer_mask = self.ipt_score.calculate_score_outer(metric="ipt")
-    
-        for n in inner_mask:
-            inner = inner_mask[n]
-            outer = outer_mask[n]
+
+        # ensure masks on same device as params
+        for k in inner_mask:
+            inner_mask[k] = inner_mask[k].to(self._device)
+            outer_mask[k] = outer_mask[k].to(self._device)
+
+            inner = inner_mask[k]
+            outer = outer_mask[k]
             assert inner.shape == outer.shape
 
             both_one = (inner == 1) & (outer == 1)
@@ -384,25 +389,25 @@ class LwF(BaseLearner):
             outer[both_zero] = 0.5
 
         with torch.no_grad():
-            for (name, p), delta_in_p, delta_out_p in zip(
-                self._network.named_parameters(), delta_in, delta_out
-        ):
-                p.copy_(theta_t[name] + inner_mask[name] * delta_in_p + outer_mask[name] * delta_out_p)
+            for (name, p), delta_in_p, delta_out_p in zip(self._network.named_parameters(), delta_in, delta_out):
+                updated = theta_t[name] + inner_mask[name] * delta_in_p + outer_mask[name] * delta_out_p
+                p.copy_(updated)
+
 
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler):
-        prog_bar = tqdm(range(epochs))
-        for _, epoch in enumerate(prog_bar):
+        prog_bar = tqdm(range(self.epochs))
+        for epoch in prog_bar:
             self._network.train()
             losses = 0.0
             correct, total = 0, 0
 
-            # lưu lại tham số trước inner/outer
-            theta_t = {n: p.clone().detach() for n, p in self._network.named_parameters()}
+            # lưu tham số gốc theta_t
+            theta_t = {name: p.clone().detach() for name, p in self._network.named_parameters()}
 
             for i, (_, inputs, targets) in enumerate(train_loader):
                 inputs, targets = inputs.to(self._device), targets.to(self._device)
 
-                # ---------------- INNER LOOP ----------------
+                # INNER
                 student_outputs = self._network(inputs)["logits"]
                 fake_targets = targets - self._known_classes
                 loss_inner = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
@@ -411,36 +416,37 @@ class LwF(BaseLearner):
                 loss_inner.backward(retain_graph=True)
                 optimizer.step()
 
-                #delta_in = [p.detach() - theta_t[n] for n, p in self._network.named_parameters()]
+                # delta_in
                 delta_in = [p.detach() - theta_t[name] for name, p in self._network.named_parameters()]
 
-
-                # ---------------- OUTER LOOP ----------------
+                # OUTER (KD) - require teacher
+                if self._old_network is None:
+                    raise RuntimeError("No teacher network available for outer loop KD (self._old_network is None). Call after_task() at end of previous task.")
                 with torch.no_grad():
                     teacher_outputs = self._old_network(inputs)["logits"]
 
                 student_outputs = self._network(inputs)["logits"]
-                kd_loss = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, T)
+                kd_loss = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
 
                 optimizer.zero_grad()
                 kd_loss.backward()
                 optimizer.step()
 
-                delta_out = [p.detach() - theta_t[n] for n, p in self._network.named_parameters()]
+                delta_out = [p.detach() - theta_t[name] for name, p in self._network.named_parameters()]
 
-                # ---------------- TASK VECTOR UPDATE ----------------
+                # TASK VECTOR UPDATE
                 self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out)
 
                 losses += (loss_inner.item() + kd_loss.item())
 
                 with torch.no_grad():
                     _, preds = torch.max(student_outputs, dim=1)
-                    correct += preds.eq(targets.expand_as(preds)).cpu().sum()
-                    total += len(targets)
+                    correct += preds.eq(targets).cpu().sum().item()
+                    total += targets.size(0)
 
             scheduler.step()
-            train_acc = np.around(tensor2numpy(correct) * 100 / total, decimals=2)
-            prog_bar.set_description(f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
+            train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
+            prog_bar.set_description(f"Task {self._cur_task}, Epoch {epoch+1}/{self.epochs}, Loss {losses/len(train_loader):.3f}, Train_acc {train_acc:.2f}")
 
 
     # SVD for calculating the W_c
