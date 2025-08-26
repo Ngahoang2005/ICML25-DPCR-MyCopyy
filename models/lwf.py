@@ -518,11 +518,18 @@ class LwF(BaseLearner):
             prog_bar.set_description(info)
 
         logging.info(info)
+def _KD_loss(student_logits, teacher_logits, T=2.0):
+    return F.kl_div(
+        F.log_softmax(student_logits / T, dim=-1),
+        F.softmax(teacher_logits / T, dim=-1),
+        reduction="batchmean"
+    ) * (T * T)
 
-def _KD_loss(pred, soft, T):
-    pred = torch.log_softmax(pred / T, dim=1)
-    soft = torch.softmax(soft / T, dim=1)
-    return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
+
+# def _KD_loss(pred, soft, T):
+#     pred = torch.log_softmax(pred / T, dim=1)
+#     soft = torch.softmax(soft / T, dim=1)
+#     return -1 * torch.mul(soft, pred).sum() / pred.shape[0]
 
 
 # import logging
