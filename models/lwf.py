@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 20
+init_epoch = 200
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20 
+epochs = 100
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -375,7 +375,7 @@ class LwF(BaseLearner):
             data_iter = iter(train_loader)
             batch_idx = 0
 
-            while batch_idx < len(train_loader):   # lặp 32 lần
+            for cycle in range(32):  # lặp 32 lần
                 # === 8 bước INNER ===
                 for _ in range(4):
                     try:
@@ -406,7 +406,7 @@ class LwF(BaseLearner):
                     if batch_idx >= len(train_loader):
                         break
                 # === 4 bước OUTER ===
-                if batch_idx < len(train_loader):
+                for _ in range(1):
                     try:
                         _, inputs, targets = next(data_iter)
                     except StopIteration:
