@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 20
+init_epoch = 200
 init_lr = 0.1
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20
+epochs = 100
 lrate = 0.05
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -257,9 +257,6 @@ class LwF(BaseLearner):
             self.best_acc_per_task.append(test_acc)
             forgetting = self.compute_forgetting(self._cur_task)
             print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
-
-            
-
         else:
             resume = self.args['resume']
             if resume:
@@ -443,9 +440,6 @@ class LwF(BaseLearner):
                 f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, "
                 f"Loss {losses/max(1,len(train_loader)):.3f}, Train_acc {train_acc:.2f}"
             )
-
-
-
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
