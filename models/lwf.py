@@ -16,15 +16,15 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 200
-init_lr = 0.1
+init_epoch = 20
+init_lr = 0.001
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100
-lrate = 0.05
+epochs = 20 
+lrate = 0.0005
 milestones = [45, 90]
 lrate_decay = 0.1
 batch_size = 128
@@ -225,7 +225,7 @@ class LwF(BaseLearner):
             if hasattr(self._network, "module"):
                 self._network_module_ptr = self._network.module
             if not resume:
-                optimizer = optim.SGD(self._network.parameters(), momentum=0.9, lr=init_lr, weight_decay=init_weight_decay)
+                optimizer = optim.AdamW(self._network.parameters(), lr=init_lr, weight_decay=init_weight_decay)
                 scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=init_milestones, gamma=init_lr_decay)
                 self._init_train(train_loader, test_loader, optimizer, scheduler)
 
@@ -268,9 +268,11 @@ class LwF(BaseLearner):
             if self._old_network is not None:
                 self._old_network.to(self._device)
             if not resume:
-                optimizer = optim.SGD(self._network.parameters(), lr=lrate, momentum=0.9, weight_decay=weight_decay)
-                scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
-                self._update_representation(train_loader, test_loader, optimizer, scheduler)
+                if not resume:
+                    optimizer = optim.AdamW(self._network.parameters(), lr=lrate, weight_decay=weight_decay)
+                    scheduler = optim.lr_scheduler.MultiStepLR(optimizer=optimizer, milestones=milestones, gamma=lrate_decay)
+                    self._update_representation(train_loader, test_loader, optimizer, scheduler)
+
             self._build_protos()                
                     
                     
