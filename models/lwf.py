@@ -377,9 +377,9 @@ class LwF(BaseLearner):
 
             data_iter = iter(train_loader)
 
-            for cycle in range(32):   # lặp 32 lần
+            for cycle in range(1):   # lặp 32 lần
                 # === 8 bước INNER ===
-                for _ in range(8):
+                for _ in range(4):
                     try:
                         _, inputs, targets = next(data_iter)
                     except StopIteration:
@@ -406,7 +406,7 @@ class LwF(BaseLearner):
                         total += targets.size(0)
 
                 # === 4 bước OUTER ===
-                for _ in range(4):
+                for _ in range(1):
                     try:
                         _, inputs, targets = next(data_iter)
                     except StopIteration:
@@ -421,8 +421,10 @@ class LwF(BaseLearner):
                         teacher_outputs = self._old_network(inputs)["logits"]
 
                     student_outputs = self._network(inputs)["logits"]
-                    kd_loss = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
-
+                    kd = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
+                    fake_targets = targets - self._known_classes
+                    ce_loss = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
+                    kd_loss = 10 * kd + ce_loss
                     optimizer.zero_grad()
                     kd_loss.backward()
                     optimizer.step()
