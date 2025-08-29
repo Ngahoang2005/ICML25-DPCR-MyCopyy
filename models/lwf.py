@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 200
+init_epoch = 20
 init_lr = 0.001
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 100 
+epochs = 20 
 lrate = 0.0005
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -124,11 +124,9 @@ class LwF(BaseLearner):
         self._old_network = None
         self.ipt_score = IPTScore(self._network)
         self.T = args.get("T", 2.0)
-        self.acc_per_task = []  # list lưu accuracy mỗi task
-        self.best_acc_per_task = []  # list lưu best acc đạt được tại lúc kết thúc từng task
-        self.acc_history = []
-
-
+        #self.acc_per_task = []  # list lưu accuracy mỗi task
+        #self.best_acc_per_task = []  # list lưu best acc đạt được tại lúc kết thúc từng task
+        #self.acc_history = []
     from utils.inc_net import CosineIncrementalNet
 
     def after_task(self):
@@ -253,8 +251,8 @@ class LwF(BaseLearner):
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
             self._build_protos()
             test_acc = self._compute_accuracy(self._network, test_loader)
-            self.acc_per_task.append(test_acc)
-            self.best_acc_per_task.append(test_acc)
+            #self.acc_per_task.append(test_acc)
+            #self.best_acc_per_task.append(test_acc)
             forgetting = self.compute_forgetting(self._cur_task)
             print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
         else:
@@ -331,11 +329,11 @@ class LwF(BaseLearner):
                 Delta = R_inv @ self.al_classifier.Q
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
-            test_acc = self._compute_accuracy(self._network, test_loader)
-            self.acc_per_task.append(test_acc)
-            self.best_acc_per_task.append(max(self.best_acc_per_task[-1], test_acc))
-            forgetting = self.compute_forgetting(self._cur_task)
-            print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
+        test_acc = self._compute_accuracy(self._network, test_loader)
+            #self.acc_per_task.append(test_acc)
+            #self.best_acc_per_task.append(max(self.best_acc_per_task[-1], test_acc))
+        forgetting = self.compute_forgetting(self._cur_task)
+        print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
 
 
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
@@ -442,10 +440,30 @@ class LwF(BaseLearner):
 
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
-            prog_bar.set_description(
-                f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, "
-                f"Loss {losses/max(1,len(train_loader)):.3f}, Train_acc {train_acc:.2f}"
-            )
+            # prog_bar.set_description(
+            #     f"Task {self._cur_task}, Epoch {epoch+1}/{epochs}, "
+            #     f"Loss {losses/max(1,len(train_loader)):.3f}, Train_acc {train_acc:.2f}"
+            # )
+            if epoch % 25 == 0:
+                test_acc = self._compute_accuracy(self._network, test_loader)
+                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}".format(
+                    self._cur_task,
+                    epoch + 1,
+                    epochs,
+                    losses / len(train_loader),
+                    train_acc,
+                    test_acc,
+                )
+            else:
+                info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}".format(
+                    self._cur_task,
+                    epoch + 1,
+                    epochs,
+                    losses / len(train_loader),
+                    train_acc,
+                )
+            prog_bar.set_description(info)
+        logging.info(info)
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
@@ -925,6 +943,12 @@ def _KD_loss(student_logits, teacher_logits, T=2.0):
 #         test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False, num_workers=4)
 #         test_acc = self._compute_accuracy(self._network, test_loader)
 #         print(f"Task {self._cur_task} - Test Accuracy (all seen classes): {test_acc:.2f}%")
+
+            # test_acc = self._compute_accuracy(self._network, test_loader)
+            # self.acc_per_task.append(test_acc)
+            # self.best_acc_per_task.append(test_acc)
+            # forgetting = self.compute_forgetting(self._cur_task)
+            # print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
 #     # SVD for calculating the W_c
 #     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
 
