@@ -137,13 +137,13 @@ class LwF(BaseLearner):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
 
-    def compute_forgetting(self, task_id):
-        forgetting = []
-        for i in range(task_id):
-            best_acc = self.best_acc_per_task[i]
-            current_acc = self.acc_per_task[i]
-            forgetting.append(best_acc - current_acc)
-        return np.mean(forgetting) if forgetting else 0.0
+    # def compute_forgetting(self, task_id):
+    #     forgetting = []
+    #     for i in range(task_id):
+    #         best_acc = self.best_acc_per_task[i]
+    #         current_acc = self.acc_per_task[i]
+    #         forgetting.append(best_acc - current_acc)
+    #     return np.mean(forgetting) if forgetting else 0.0
 
 
     def incremental_train(self, data_manager):
@@ -329,11 +329,12 @@ class LwF(BaseLearner):
                 Delta = R_inv @ self.al_classifier.Q
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
+                
         test_acc = self._compute_accuracy(self._network, test_loader)
-            #self.acc_per_task.append(test_acc)
-            #self.best_acc_per_task.append(max(self.best_acc_per_task[-1], test_acc))
-        forgetting = self.compute_forgetting(self._cur_task)
-        print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
+        #self.acc_per_task.append(test_acc)
+        #self.best_acc_per_task.append(max(self.best_acc_per_task[-1], test_acc))
+        # forgetting = self.compute_forgetting(self._cur_task)
+        print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%")
 
 
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
