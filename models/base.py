@@ -111,12 +111,10 @@ class BaseLearner(object):
             predicts = torch.max(outputs, dim=1)[1]
             correct += (predicts.cpu() == targets).sum()
             total += len(targets)
-
         return np.around(tensor2numpy(correct) * 100 / total, decimals=2)
 
     def _eval_cnn(self, loader):
         self._network.eval()
-        #self._network.to(self._device)  
         y_pred, y_true = [], []
 
         for _, (_, inputs, targets) in enumerate(loader):

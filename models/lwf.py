@@ -138,15 +138,6 @@ class LwF(BaseLearner):
                 os.makedirs(self.args["model_dir"])
             self.save_checkpoint("{}".format(self.args["model_dir"]))
 
-    # def compute_forgetting(self, task_id):
-    #     forgetting = []
-    #     for i in range(task_id):
-    #         best_acc = self.best_acc_per_task[i]
-    #         current_acc = self.acc_per_task[i]
-    #         forgetting.append(best_acc - current_acc)
-    #     return np.mean(forgetting) if forgetting else 0.0
-
-
     def incremental_train(self, data_manager):
         self.data_manager = data_manager
         self._cur_task += 1
@@ -376,7 +367,7 @@ class LwF(BaseLearner):
             data_iter = iter(train_loader)
             #batch_idx = 0
 
-            for cycle in range(78):  # lặp 32 lần
+            for cycle in range(64):  # lặp 32 lần
                 # === 8 bước INNER ===
                 for _ in range(4):
                     try:
