@@ -377,7 +377,7 @@ class LwF(BaseLearner):
             data_iter = iter(train_loader)
             batch_idx = 0
 
-            for cycle in range(78):  # lặp 32 lần
+            for cycle in range(16):  # lặp 32 lần
                 # === 8 bước INNER ===
                 for _ in range(4):
                     try:
