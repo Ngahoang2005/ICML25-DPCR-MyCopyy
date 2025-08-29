@@ -491,18 +491,6 @@ class LwF(BaseLearner):
                 self._covs.append(torch.tensor(cov).to(self._device))
                 self._projectors.append(self.get_projector_svd(self._covs[class_idx]))
 
-    def _compute_accuracy(self, model, data_loader):
-        model.eval()
-        correct, total = 0, 0
-        with torch.no_grad():
-            for _, inputs, targets in data_loader:
-                inputs, targets = inputs.to(self._device), targets.to(self._device)
-                outputs = model(inputs)["logits"]   # forward backbone
-                preds = torch.argmax(outputs, dim=1)
-                correct += preds.eq(targets).sum().item()
-                total += targets.size(0)
-        acc = 100.0 * correct / total if total > 0 else 0.0
-        return acc
 
     def _init_train(self, train_loader, test_loader, optimizer, scheduler):
         prog_bar = tqdm(range(init_epoch))
