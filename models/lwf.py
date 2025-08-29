@@ -250,11 +250,11 @@ class LwF(BaseLearner):
             self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                     F.normalize(torch.t(Delta.float()), p=2, dim=-1))
             self._build_protos()
-            test_acc = self._compute_accuracy(self._network, test_loader)
+            #test_acc = self._compute_accuracy(self._network, test_loader)
             #self.acc_per_task.append(test_acc)
             #self.best_acc_per_task.append(test_acc)
-            forgetting = self.compute_forgetting(self._cur_task)
-            print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
+            # forgetting = self.compute_forgetting(self._cur_task)
+            # print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%, Forgetting: {forgetting:.2f}%")
         else:
             resume = self.args['resume']
             if resume:
