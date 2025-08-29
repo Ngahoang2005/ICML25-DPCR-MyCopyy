@@ -365,7 +365,6 @@ class LwF(BaseLearner):
             theta_t = {name: p.clone().detach() for name, p in self._network.named_parameters()}
 
             data_iter = iter(train_loader)
-            #batch_idx = 0
 
             for cycle in range(64):  # lặp 32 lần
                 # === 8 bước INNER ===
@@ -394,9 +393,7 @@ class LwF(BaseLearner):
                         _, preds = torch.max(student_outputs, dim=1)
                         correct += preds.eq(targets).cpu().sum().item()
                         total += targets.size(0)
-                    batch_idx += 1
-                    if batch_idx >= len(train_loader):
-                        break
+
                 # === 4 bước OUTER ===
                 for _ in range(1):
                     try:
@@ -428,7 +425,6 @@ class LwF(BaseLearner):
                     self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out)
 
                     losses += kd_loss.item()
-                    batch_idx += 1
 
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
