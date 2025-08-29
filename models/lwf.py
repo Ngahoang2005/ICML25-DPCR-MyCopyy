@@ -838,7 +838,8 @@ class LwF(BaseLearner):
                 self.al_classifier.fc.weight = torch.nn.parameter.Parameter(
                         F.normalize(torch.t(Delta.float()), p=2, dim=-1))
 
-
+        test_acc = self._compute_accuracy(self._network, test_loader)
+        print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%")
 
 
 
