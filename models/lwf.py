@@ -408,7 +408,7 @@ class LwF(BaseLearner):
                     if batch_idx >= len(train_loader):
                         break
                 # === 4 bước OUTER ===
-                for _ in range(1):
+                for _ in range(2):
                     try:
                         _, inputs, targets = next(data_iter)
                     except StopIteration:
