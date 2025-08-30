@@ -78,90 +78,54 @@ class IPTScore:
         self.taylor = taylor
         self.eps = eps
 
-        # dicts mapping param_name -> tensor same shape as param
         self.ipt = {}
         self.exp_avg_ipt = {}
         self.exp_avg_unc = {}
 
     def _ensure_entry(self, name, template_tensor):
-        """Ensure all three dicts have an entry with the same shape/device/dtype."""
-        # if existing but shape mismatch -> reinit to zeros_like(template_tensor)
         for d in (self.ipt, self.exp_avg_ipt, self.exp_avg_unc):
             if name not in d or d[name].shape != template_tensor.shape:
-                # create on same device/dtype as template_tensor
                 d[name] = torch.zeros_like(template_tensor)
 
-    def update_ipt(self, global_step=None):
-        """
-        Call this after backward (when p.grad exists for updated params).
-        Robustly handles params with grad==None by setting ipt=0 and ensuring
-        exp_avg entries exist with correct shape/device.
-        """
+    def update_ipt(self):
         for n, p in self.model.named_parameters():
-            # ensure entries exist (create zeros with correct shape/device)
             self._ensure_entry(n, p)
-
             if p.grad is None:
-                # param has no grad at this step -> ipt = 0 (keep EMA running)
-                # We set ipt[n] to zeros_like(p) (device/dtype matched in _ensure_entry)
                 self.ipt[n].zero_()
             else:
                 with torch.no_grad():
-                    # compute ipt according to taylor option
                     if self.taylor == "param_first":
                         ipt_val = (p * p.grad).abs()
                     elif self.taylor == "param_second":
                         ipt_val = (p * p.grad * p * p.grad).abs()
-                    elif self.taylor == "param_mix":
-                        ipt_val = (p * p.grad - 0.5 * (p * p.grad * p * p.grad)).abs()
-                    else:
-                        raise ValueError(f"Unknown IPT metric {self.taylor}")
-
-                    # detach and copy into ipt dict (preserve device/dtype)
+                    else:  # fallback Fisher-like
+                        ipt_val = (p.grad * p.grad).abs()
                     self.ipt[n].copy_(ipt_val.detach())
 
-            # --- now update EMA safely ---
-            # If shapes changed earlier, _ensure_entry ensures exp_avg_* exist and match shape
             with torch.no_grad():
                 self.exp_avg_ipt[n] = self.beta1 * self.exp_avg_ipt[n] + (1 - self.beta1) * self.ipt[n]
                 self.exp_avg_unc[n] = self.beta2 * self.exp_avg_unc[n] + (1 - self.beta2) * (self.ipt[n] - self.exp_avg_ipt[n]).abs()
 
-    def calculate_score_inner(self, metric="ipt"):
-        """
-        Return dict {name: tensor} for inner mask calculation.
-        Default uses exp_avg_ipt. For params not present return zeros_like param.
-        """
+    def _normalize(self, x):
+        # normalize to [0,1]
+        minv, maxv = x.min(), x.max()
+        if (maxv - minv) < 1e-12:
+            return torch.zeros_like(x)
+        return (x - minv) / (maxv - minv + self.eps)
+
+    def calculate_score_inner(self):
         scores = {}
         for n, p in self.model.named_parameters():
-            # make sure we have shape-correct entries
-            if n not in self.exp_avg_ipt:
-                # no history -> zeros
-                scores[n] = torch.zeros_like(p)
-            else:
-                if metric == "ipt":
-                    scores[n] = self.exp_avg_ipt[n].clone().detach()
-                elif metric == "mag":
-                    scores[n] = p.abs().detach().clone()
-                else:
-                    raise ValueError(f"Unexpected inner metric {metric}")
+            e_ipt = self.exp_avg_ipt.get(n, torch.zeros_like(p))
+            scores[n] = self._normalize(e_ipt.clone().detach())
         return scores
 
-    def calculate_score_outer(self, metric="ipt"):
-        """
-        Return dict {name: tensor} for outer mask/rank update.
-        Default uses exp_avg_ipt * exp_avg_unc.
-        """
+    def calculate_score_outer(self):
         scores = {}
         for n, p in self.model.named_parameters():
-            # if missing entries treat as zeros
             e_ipt = self.exp_avg_ipt.get(n, torch.zeros_like(p))
             e_unc = self.exp_avg_unc.get(n, torch.zeros_like(p))
-            if metric == "ipt":
-                scores[n] = (e_ipt * e_unc).clone().detach()
-            elif metric == "mag":
-                scores[n] = p.abs().detach().clone()
-            else:
-                raise ValueError(f"Unexpected outer metric {metric}")
+            scores[n] = self._normalize((e_ipt * e_unc).clone().detach())
         return scores
 
 
@@ -428,40 +392,21 @@ class LwF(BaseLearner):
     #         for name, p in self._network.named_parameters():
     #             updated = theta_t[name] + inner_mask[name] * delta_in[name] + outer_mask[name] * delta_out[name]
     #             p.copy_(updated)
-    def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
-        # 计算最终的更新量
+    def update_parameters_with_task_vectors(self):
+        """
+        Thay vì overwrite tham số = θ_t + delta,
+        mình chỉ chỉnh gradient bằng IPT mask.
+        """
         inner_mask = self.ipt_score.calculate_score_inner()
         outer_mask = self.ipt_score.calculate_score_outer()
-        
-        for n in inner_mask:
-            inner = inner_mask[n]
-            outer = outer_mask[n]
-            assert inner.shape == outer.shape, f"Mismatched shape for {n}: {inner.shape} vs {outer.shape}"
-            both_one = (inner == 1) & (outer == 1)
-            inner[both_one] = 0.4
-            outer[both_one] = 0.6
-            both_zero = (inner == 0) & (outer == 0)
-            inner[both_zero] = 0.5
-            outer[both_zero] = 0.5
-        keys_inner_mask = set(inner_mask.keys())
-        keys_delta_in = set(delta_in.keys())
-        keys_delta_out = set(delta_out.keys())
-        keys_outer_mask = set(outer_mask.keys())
-        keys_theta_t = set(theta_t.keys())
 
-        assert keys_inner_mask == keys_delta_in == keys_delta_out == keys_outer_mask == keys_theta_t, (
-            f"Key mismatch: inner_mask keys: {keys_inner_mask}, "
-            f"delta_in keys: {keys_delta_in}, "
-            f"delta_out keys: {keys_delta_out}, "
-            f"outer_mask keys: {keys_outer_mask}, "
-            f"theta_t keys: {keys_theta_t}"
-        )
-        final_delta = {n: inner_mask[n] * delta_in[n] + outer_mask[n] * delta_out[n] for n in theta_t}
         with torch.no_grad():
             for n, p in self._network.named_parameters():
-                if n in final_delta:
-                    p.copy_(theta_t[n] + final_delta[n])
-
+                if p.grad is not None:
+                    # Quan trọng (mask cao) => giảm update
+                    mask = 1.0 - 0.5 * inner_mask[n] - 0.5 * outer_mask[n]
+                    # scale gradient
+                    p.grad.mul_(mask)
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler): 
         prog_bar = tqdm(range(epochs))
         for epoch in prog_bar:
@@ -469,12 +414,9 @@ class LwF(BaseLearner):
             losses = 0.0
             correct, total = 0, 0
 
-            # lưu tham số gốc theta_t
-            theta_t = {name: p.clone().detach() for name, p in self._network.named_parameters()}
-
             data_iter = iter(train_loader)
-            batch_idx = 0
-            for cycle in range(32):  # lặp 32 lần
+
+            for cycle in range(32):  # 32 chu kỳ
                 # === 4 bước INNER ===
                 for _ in range(4):
                     try:
@@ -484,64 +426,64 @@ class LwF(BaseLearner):
                         _, inputs, targets = next(data_iter)
 
                     inputs, targets = inputs.to(self._device), targets.to(self._device)
-
                     student_outputs = self._network(inputs)["logits"]
+
                     fake_targets = targets - self._known_classes
                     loss_inner = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
 
                     optimizer.zero_grad()
-                    loss_inner.backward(retain_graph=True)
+                    loss_inner.backward()
+                    self.ipt_score.update_ipt()   # cập nhật importance
+                    # scale gradient bằng IPT mask
+                    inner_mask = self.ipt_score.calculate_score_inner()
+                    with torch.no_grad():
+                        for n, p in self._network.named_parameters():
+                            if p.grad is not None:
+                                p.grad.mul_(1.0 - inner_mask[n])  
                     optimizer.step()
-
-                    self.ipt_score.update_ipt(global_step=batch_idx)
-
-                    # delta_in
-                    delta_in = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
 
                     losses += loss_inner.item()
-                    with torch.no_grad():
-                        _, preds = torch.max(student_outputs, dim=1)
-                        correct += preds.eq(targets).cpu().sum().item()
-                        total += targets.size(0)
-                    batch_idx += 1
-                    if batch_idx >= len(train_loader):
-                        break
-                # === 4 bước OUTER ===
-                for _ in range(1):
-                    try:
-                        _, inputs, targets = next(data_iter)
-                    except StopIteration:
-                        data_iter = iter(train_loader)
-                        _, inputs, targets = next(data_iter)
+                    _, preds = torch.max(student_outputs, dim=1)
+                    correct += preds.eq(targets).cpu().sum().item()
+                    total += targets.size(0)
 
-                    inputs, targets = inputs.to(self._device), targets.to(self._device)
+                # === 1 bước OUTER ===
+                try:
+                    _, inputs, targets = next(data_iter)
+                except StopIteration:
+                    data_iter = iter(train_loader)
+                    _, inputs, targets = next(data_iter)
 
-                    if self._old_network is None:
-                        raise RuntimeError("No teacher network for KD")
-                    with torch.no_grad():
-                        teacher_outputs = self._old_network(inputs)["logits"]
+                inputs, targets = inputs.to(self._device), targets.to(self._device)
 
-                    student_outputs = self._network(inputs)["logits"]
-                    kd = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
-                    fake_targets = targets - self._known_classes
-                    ce_loss = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
-                    kd_loss = 10 * kd + ce_loss
-                    optimizer.zero_grad()
-                    kd_loss.backward()
-                    optimizer.step()
-                    self.ipt_score.update_ipt(global_step=batch_idx)
-                    # delta_out
-                    delta_out = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
+                if self._old_network is None:
+                    raise RuntimeError("No teacher network for KD")
+                with torch.no_grad():
+                    teacher_outputs = self._old_network(inputs)["logits"]
 
-                    # TASK VECTOR UPDATE
-                    self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out)
+                student_outputs = self._network(inputs)["logits"]
+                kd = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
+                fake_targets = targets - self._known_classes
+                ce_loss = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
+                kd_loss = self.args.get("lamda", 10) * kd + ce_loss
 
-                    losses += kd_loss.item()
-                    batch_idx += 1
+                optimizer.zero_grad()
+                kd_loss.backward()
+                self.ipt_score.update_ipt()
+                # scale gradient bằng outer mask
+                outer_mask = self.ipt_score.calculate_score_outer()
+                with torch.no_grad():
+                    for n, p in self._network.named_parameters():
+                        if p.grad is not None:
+                            p.grad.mul_(1.0 - outer_mask[n])
+                optimizer.step()
 
+                losses += kd_loss.item()
 
+            # ---- epoch end ----
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
+
             if epoch % 25 == 0:
                 test_acc = self._compute_accuracy(self._network, test_loader)
                 info = "Task {}, Epoch {}/{} => Loss {:.3f}, Train_accy {:.2f}, Test_accy {:.2f}".format(
@@ -562,6 +504,7 @@ class LwF(BaseLearner):
                 )
             prog_bar.set_description(info)
         logging.info(info)
+
     # SVD for calculating the W_c
     def get_projector_svd(self, raw_matrix, all_non_zeros=True):
         V, S, VT = torch.svd(raw_matrix)
