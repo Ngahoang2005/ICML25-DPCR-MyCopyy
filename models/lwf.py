@@ -113,49 +113,25 @@ class IPTScore:
             return torch.zeros_like(x)
         return (x - minv) / (maxv - minv + self.eps)
 
-    def calculate_score_inner(self):
-        """
-        Tính inner importance score = |grad * weight|
-        Chỉ giữ lại Top-40 tham số toàn mạng
-        """
-        scores = {}
-        for n, p in self.model.named_parameters():
-            if p.grad is None:
-                scores[n] = torch.zeros_like(p.data)
-            else:
-                scores[n] = (p.grad * p.data).abs().clone().detach()
-
-        # gom tất cả score thành 1 tensor
-        all_scores = torch.cat([s.flatten() for s in scores.values()])
-        k = min(40, all_scores.numel())
-        threshold = torch.topk(all_scores, k)[0][-1]  # ngưỡng nhỏ nhất trong top-k
-
-        masks = {}
-        for n, s in scores.items():
-            masks[n] = (s >= threshold).float()
-        return masks
-
-    @torch.no_grad()
-    def calculate_score_outer(self):
-        """
-        Tính outer importance score = exp_avg_ipt * exp_avg_unc
-        Chỉ giữ lại Top-40 tham số toàn mạng
-        """
-        scores = {}
-        for n, p in self.model.named_parameters():
-            if (n not in self.exp_avg_ipt) or (n not in self.exp_avg_unc):
-                scores[n] = torch.zeros_like(p.data)
-            else:
-                scores[n] = (self.exp_avg_ipt[n] * self.exp_avg_unc[n]).clone().detach()
-
-        all_scores = torch.cat([s.flatten() for s in scores.values()])
-        k = min(40, all_scores.numel())
+    def calculate_score_inner(self, ratio=0.4):
+        all_scores = torch.cat([v.view(-1) for v in self.scores.values()])
+        k = int(ratio * all_scores.numel())   # lấy 40% tham số
+        if k < 1:
+            k = 1
         threshold = torch.topk(all_scores, k)[0][-1]
 
-        masks = {}
-        for n, s in scores.items():
-            masks[n] = (s >= threshold).float()
-        return masks
+        mask = {n: (v >= threshold).float() for n, v in self.scores.items()}
+        return mask
+
+    def calculate_score_outer(self, ratio=0.4):
+        all_scores = torch.cat([v.view(-1) for v in self.scores.values()])
+        k = int(ratio * all_scores.numel())   # lấy 40% tham số
+        if k < 1:
+            k = 1
+        threshold = torch.topk(all_scores, k)[0][-1]
+
+        mask = {n: (v >= threshold).float() for n, v in self.scores.items()}
+        return mask
 
 
 class LwF(BaseLearner):
