@@ -11,7 +11,7 @@
   "convnet_type": "resnet18",
   "batch_size": 128,
   "device": ["0"],
-  "seed": [1993],
+  "seed": [1992],
   "resume": false,
   "model_dir": "save_model/cifar100/dpcr_cifar_10_seed_1993/",
   "DPCR": true,
