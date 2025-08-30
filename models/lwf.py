@@ -403,24 +403,7 @@ class LwF(BaseLearner):
         """
         inner_mask = self.ipt_score.calculate_score_inner()
         outer_mask = self.ipt_score.calculate_score_outer()
-        for n in inner_mask:
-            # 遍历每个 mask 的元素
-            inner = inner_mask[n]
-            outer = outer_mask[n]
-
-            # 检查 inner 和 outer 是否具有相同的大小，确保可以逐元素操作
-            assert inner.shape == outer.shape, f"Mismatched shape for {n}: {inner.shape} vs {outer.shape}"
-
-            # 修改 mask 的值
-            # 都为 1 时，更新为 0.4 和 0.6
-            both_one = (inner == 1) & (outer == 1)
-            inner[both_one] = 0.4
-            outer[both_one] = 0.6
-
-            # 都为 0 时，更新为 0.4 和 0.6
-            both_zero = (inner == 0) & (outer == 0)
-            inner[both_zero] = 0.5
-            outer[both_zero] = 0.5
+        
         final_delta = {n: inner_mask[n] * delta_in[n] + outer_mask[n] * delta_out[n] for n in theta_t}
         with torch.no_grad():
             for n, p in self._network.named_parameters():
@@ -456,9 +439,9 @@ class LwF(BaseLearner):
                     optimizer.step()
     
                     losses += loss_inner.item()
-                    _, preds = torch.max(student_outputs, dim=1)
-                    correct += preds.eq(targets).cpu().sum().item()
-                    total += targets.size(0)
+                    # _, preds = torch.max(student_outputs, dim=1)
+                    # correct += preds.eq(targets).cpu().sum().item()
+                    # total += targets.size(0)
                 theta_after_inner = {n: p.clone().detach() for n, p in self._network.named_parameters()}
                 delta_in = {n: theta_after_inner[n] - theta_t[n] for n in theta_t}
 
@@ -480,7 +463,7 @@ class LwF(BaseLearner):
                 kd = _KD_loss(student_outputs[:, :self._known_classes], teacher_outputs, self.T)
                 fake_targets = targets - self._known_classes
                 ce_loss = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
-                kd_loss = self.args.get("lamda", 10) * kd + ce_loss
+                kd_loss = 10 * kd + ce_loss
 
                 optimizer.zero_grad()
                 kd_loss.backward()
