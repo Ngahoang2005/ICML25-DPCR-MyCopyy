@@ -83,38 +83,23 @@ class IPTScore:
         self.exp_avg_unc = {}
 
     def update_ipt(self, global_step):
-        for n, p in self._network.named_parameters():
+        for n, p in self.model.named_parameters():
             if p.grad is None:
-                # param không có grad => không quan trọng
-                self.ipt[n] = torch.zeros_like(p)
                 continue
-
+            grad2 = p.grad.data.pow(2)
             if n not in self.ipt:
-                self.ipt[n] = torch.zeros_like(p)
-                self.exp_avg_ipt[n] = torch.zeros_like(p)
-                self.exp_avg_unc[n] = torch.zeros_like(p)
+                self.ipt[n] = grad2.clone()
+            else:
+                self.ipt[n] = self.beta2 * self.ipt[n] + (1 - self.beta2) * grad2
 
-            with torch.no_grad():
-                # --- công thức IPT ---
-                if self.taylor == "param_first":
-                    ipt_val = (p * p.grad).abs()
-                elif self.taylor == "param_second":
-                    ipt_val = (p * p.grad * p * p.grad).abs()
-                elif self.taylor == "param_mix":
-                    ipt_val = (p * p.grad - 0.5 * (p * p.grad * p * p.grad)).abs()
-                else:
-                    raise ValueError(f"Unknown IPT metric {self.taylor}")
+            # === FIX: ensure shape match ===
+            if n not in self.exp_avg_ipt or self.exp_avg_ipt[n].shape != self.ipt[n].shape:
+                self.exp_avg_ipt[n] = torch.zeros_like(self.ipt[n], device=p.device)
 
-                self.ipt[n] = ipt_val.detach()
+            self.exp_avg_ipt[n] = (
+                self.beta1 * self.exp_avg_ipt[n] + (1 - self.beta1) * self.ipt[n]
+            )
 
-                # --- EMA smoothing ---
-                self.exp_avg_ipt[n] = (
-                    self.beta1 * self.exp_avg_ipt[n] + (1 - self.beta1) * self.ipt[n]
-                )
-                self.exp_avg_unc[n] = (
-                    self.beta2 * self.exp_avg_unc[n]
-                    + (1 - self.beta2) * (self.ipt[n] - self.exp_avg_ipt[n]).abs()
-                )
 
     # ====== Inner score (dùng cho việc chọn tham số giữ lại) ======
     def calculate_score_inner(self, metric="ipt"):
