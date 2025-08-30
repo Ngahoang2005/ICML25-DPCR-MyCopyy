@@ -65,23 +65,112 @@ lamda = 10
 
 EPSILON = 1e-8
 
+import torch
+from collections import defaultdict
+
 class IPTScore:
-    def __init__(self, model):
+    def __init__(self, model, beta1=0.9, beta2=0.99, eps=1e-8, tau=1.0):
+        """
+        model : nn.Module
+            Mô hình backbone (dùng để lấy parameters).
+        beta1, beta2 : float
+            Hệ số trung bình trượt (EMA) cho ipt và unc.
+        eps : float
+            Giá trị nhỏ để tránh chia 0.
+        tau : float
+            Nhiệt độ khi chuẩn hóa softmax.
+        """
         self.model = model
-        self.inner_score = {n: torch.zeros_like(p) for n, p in model.named_parameters()}
-        self.outer_score = {n: torch.zeros_like(p) for n, p in model.named_parameters()}
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.tau = tau
 
-    # def calculate_score_inner(self, metric="ipt"):
-    #     # Ở bản đơn giản nhất, inner_mask = 0.5 hết
-    #     return {n: torch.ones_like(p) * 0.5 for n, p in self.model.named_parameters()}
-    def calculate_score_inner(self, p=None, metric="ipt"):
-        assert len(self.exp_avg_ipt_inner) == len(self.exp_avg_unc_inner)
+        # EMA cho inner / outer
+        self.exp_avg_ipt_inner = defaultdict(lambda: None)
+        self.exp_avg_unc_inner = defaultdict(lambda: None)
+        self.exp_avg_ipt_outer = defaultdict(lambda: None)
+        self.exp_avg_unc_outer = defaultdict(lambda: None)
 
-    # def calculate_score_outer(self, metric="ipt"):
-    #     # Outer mask mặc định = 0.5 hết
-    #     return {n: torch.ones_like(p) * 0.5 for n, p in self.model.named_parameters()}
-    def calculate_score_outer_local(self, p=None, metric="ipt"):
-        assert len(self.exp_avg_ipt_outer) == len(self.exp_avg_unc_outer)
+    def _update_ema(self, ema_dict, name, new_val, beta):
+        """Cập nhật trung bình trượt"""
+        if ema_dict[name] is None:
+            ema_dict[name] = new_val.clone().detach()
+        else:
+            ema_dict[name] = beta * ema_dict[name] + (1 - beta) * new_val.detach()
+
+    def update_inner(self):
+        """Cập nhật EMA inner cho tất cả tham số"""
+        for name, p in self.model.named_parameters():
+            if p.grad is None:
+                continue
+
+            # importance = |w * grad|
+            ipt = (p * p.grad).abs()
+            # uncertainty proxy = |grad|
+            unc = p.grad.abs()
+
+            self._update_ema(self.exp_avg_ipt_inner, name, ipt, self.beta1)
+            self._update_ema(self.exp_avg_unc_inner, name, unc, self.beta2)
+
+    def update_outer(self):
+        """Cập nhật EMA outer cho tất cả tham số"""
+        for name, p in self.model.named_parameters():
+            if p.grad is None:
+                continue
+
+            ipt = (p * p.grad).abs()
+            unc = p.grad.abs()
+
+            self._update_ema(self.exp_avg_ipt_outer, name, ipt, self.beta1)
+            self._update_ema(self.exp_avg_unc_outer, name, unc, self.beta2)
+
+    def _calculate_score(self, ipt_dict, unc_dict):
+        """Tính score cho một nhánh (inner/outer)"""
+        # --- Safety check ---
+        assert set(ipt_dict.keys()) == set(unc_dict.keys()), \
+            "Mismatch keys giữa IPT và UNC dict"
+
+        score_dict = {}
+        all_scores = []
+
+        # raw score = EMA(ipt) * EMA(unc)
+        for name in ipt_dict.keys():
+            ipt = ipt_dict[name]
+            unc = unc_dict[name]
+            if ipt is None or unc is None:
+                continue
+
+            score = ipt * unc
+            score_dict[name] = score
+            all_scores.append(score.view(-1))
+
+        if not all_scores:  # nếu rỗng
+            return {name: torch.zeros_like(p) for name, p in self.model.named_parameters()}
+
+        all_scores = torch.cat(all_scores)
+        min_val, max_val = all_scores.min(), all_scores.max()
+
+        # normalize 0-1
+        norm_scores = {}
+        for name, score in score_dict.items():
+            if max_val - min_val < self.eps:
+                norm_scores[name] = torch.ones_like(score) * 0.5
+            else:
+                norm_scores[name] = (score - min_val) / (max_val - min_val + self.eps)
+
+        # softmax-like scaling (temperature tau)
+        final_scores = {
+            name: torch.softmax(score.view(-1) / self.tau, dim=0).view_as(score)
+            for name, score in norm_scores.items()
+        }
+        return final_scores
+
+    def calculate_score_inner(self):
+        return self._calculate_score(self.exp_avg_ipt_inner, self.exp_avg_unc_inner)
+
+    def calculate_score_outer(self):
+        return self._calculate_score(self.exp_avg_ipt_outer, self.exp_avg_unc_outer)
 
 class LwF(BaseLearner):
     def __init__(self, args):
@@ -324,8 +413,8 @@ class LwF(BaseLearner):
 
 
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
-        inner_mask = self.ipt_score.calculate_score_inner(metric="ipt")
-        outer_mask = self.ipt_score.calculate_score_outer(metric="ipt")
+        inner_mask = self.ipt_score.calculate_score_inner()
+        outer_mask = self.ipt_score.calculate_score_outer()
 
         for k in inner_mask:
             inner_mask[k] = inner_mask[k].to(self._device)
@@ -335,11 +424,11 @@ class LwF(BaseLearner):
             outer = outer_mask[k]
             assert inner.shape == outer.shape
 
-            both_one = (inner == 1) & (outer == 1)
-            inner[both_one] = 0.4
-            outer[both_one] = 0.6
+            both_high = (inner > 0.9) & (outer > 0.9)
+            inner[both_high] = 0.4
+            outer[both_high] = 0.6
 
-            both_zero = (inner == 0) & (outer == 0)
+            both_zero = (inner < 0.1) & (outer < 0.1)
             inner[both_zero] = 0.5
             outer[both_zero] = 0.5
 
