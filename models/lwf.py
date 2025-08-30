@@ -419,7 +419,7 @@ class LwF(BaseLearner):
             outer[both_zero] = 0.5
         final_delta = {n: inner_mask[n] * delta_in[n] + outer_mask[n] * delta_out[n] for n in theta_t}
         with torch.no_grad():
-            for n, p in self.model.named_parameters():
+            for n, p in self._network.named_parameters():
                 if n in final_delta:
                     p.copy_(theta_t[n] + final_delta[n])
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler): 
