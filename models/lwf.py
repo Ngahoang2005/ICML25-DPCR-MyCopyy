@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 20
+init_epoch =1
 init_lr = 0.001
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20 
+epochs = 1
 lrate = 0.0005
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -114,19 +114,48 @@ class IPTScore:
         return (x - minv) / (maxv - minv + self.eps)
 
     def calculate_score_inner(self):
+        """
+        Tính inner importance score = |grad * weight|
+        Chỉ giữ lại Top-40 tham số toàn mạng
+        """
         scores = {}
         for n, p in self.model.named_parameters():
-            e_ipt = self.exp_avg_ipt.get(n, torch.zeros_like(p))
-            scores[n] = self._normalize(e_ipt.clone().detach())
-        return scores
+            if p.grad is None:
+                scores[n] = torch.zeros_like(p.data)
+            else:
+                scores[n] = (p.grad * p.data).abs().clone().detach()
 
+        # gom tất cả score thành 1 tensor
+        all_scores = torch.cat([s.flatten() for s in scores.values()])
+        k = min(40, all_scores.numel())
+        threshold = torch.topk(all_scores, k)[0][-1]  # ngưỡng nhỏ nhất trong top-k
+
+        masks = {}
+        for n, s in scores.items():
+            masks[n] = (s >= threshold).float()
+        return masks
+
+    @torch.no_grad()
     def calculate_score_outer(self):
+        """
+        Tính outer importance score = exp_avg_ipt * exp_avg_unc
+        Chỉ giữ lại Top-40 tham số toàn mạng
+        """
         scores = {}
         for n, p in self.model.named_parameters():
-            e_ipt = self.exp_avg_ipt.get(n, torch.zeros_like(p))
-            e_unc = self.exp_avg_unc.get(n, torch.zeros_like(p))
-            scores[n] = self._normalize((e_ipt * e_unc).clone().detach())
-        return scores
+            if (n not in self.exp_avg_ipt) or (n not in self.exp_avg_unc):
+                scores[n] = torch.zeros_like(p.data)
+            else:
+                scores[n] = (self.exp_avg_ipt[n] * self.exp_avg_unc[n]).clone().detach()
+
+        all_scores = torch.cat([s.flatten() for s in scores.values()])
+        k = min(40, all_scores.numel())
+        threshold = torch.topk(all_scores, k)[0][-1]
+
+        masks = {}
+        for n, s in scores.items():
+            masks[n] = (s >= threshold).float()
+        return masks
 
 
 class LwF(BaseLearner):
@@ -367,31 +396,6 @@ class LwF(BaseLearner):
         test_acc = self._compute_accuracy(self._network, test_loader)
         print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%")
 
-
-    # def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
-    #     inner_mask = self.ipt_score.calculate_score_inner()
-    #     outer_mask = self.ipt_score.calculate_score_outer()
-
-    #     for k in inner_mask:
-    #         inner_mask[k] = inner_mask[k].to(self._device)
-    #         outer_mask[k] = outer_mask[k].to(self._device)
-
-    #         inner = inner_mask[k]
-    #         outer = outer_mask[k]
-    #         assert inner.shape == outer.shape
-
-    #         both_high = (inner > 0.9) & (outer > 0.9)
-    #         inner[both_high] = 0.4
-    #         outer[both_high] = 0.6
-
-    #         both_zero = (inner < 0.1) & (outer < 0.1)
-    #         inner[both_zero] = 0.5
-    #         outer[both_zero] = 0.5
-
-    #     with torch.no_grad():
-    #         for name, p in self._network.named_parameters():
-    #             updated = theta_t[name] + inner_mask[name] * delta_in[name] + outer_mask[name] * delta_out[name]
-    #             p.copy_(updated)
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
         """
         Thay vì overwrite tham số = θ_t + delta,
@@ -448,7 +452,7 @@ class LwF(BaseLearner):
 
                     optimizer.zero_grad()
                     loss_inner.backward()
-                    #self.ipt_score.update_ipt()   # cập nhật importance
+                    self.ipt_score.update_ipt()   # cập nhật importance
                     optimizer.step()
     
                     losses += loss_inner.item()
