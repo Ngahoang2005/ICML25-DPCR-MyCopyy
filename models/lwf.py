@@ -367,31 +367,63 @@ class LwF(BaseLearner):
         print(f"Task {self._cur_task} finished → Test Acc: {test_acc:.2f}%")
 
 
+    # def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
+    #     inner_mask = self.ipt_score.calculate_score_inner()
+    #     outer_mask = self.ipt_score.calculate_score_outer()
+
+    #     for k in inner_mask:
+    #         inner_mask[k] = inner_mask[k].to(self._device)
+    #         outer_mask[k] = outer_mask[k].to(self._device)
+
+    #         inner = inner_mask[k]
+    #         outer = outer_mask[k]
+    #         assert inner.shape == outer.shape
+
+    #         both_high = (inner > 0.9) & (outer > 0.9)
+    #         inner[both_high] = 0.4
+    #         outer[both_high] = 0.6
+
+    #         both_zero = (inner < 0.1) & (outer < 0.1)
+    #         inner[both_zero] = 0.5
+    #         outer[both_zero] = 0.5
+
+    #     with torch.no_grad():
+    #         for name, p in self._network.named_parameters():
+    #             updated = theta_t[name] + inner_mask[name] * delta_in[name] + outer_mask[name] * delta_out[name]
+    #             p.copy_(updated)
     def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
+        # 计算最终的更新量
         inner_mask = self.ipt_score.calculate_score_inner()
         outer_mask = self.ipt_score.calculate_score_outer()
-
-        for k in inner_mask:
-            inner_mask[k] = inner_mask[k].to(self._device)
-            outer_mask[k] = outer_mask[k].to(self._device)
-
-            inner = inner_mask[k]
-            outer = outer_mask[k]
-            assert inner.shape == outer.shape
-
-            both_high = (inner > 0.9) & (outer > 0.9)
-            inner[both_high] = 0.4
-            outer[both_high] = 0.6
-
-            both_zero = (inner < 0.1) & (outer < 0.1)
+        
+        for n in inner_mask:
+            inner = inner_mask[n]
+            outer = outer_mask[n]
+            assert inner.shape == outer.shape, f"Mismatched shape for {n}: {inner.shape} vs {outer.shape}"
+            both_one = (inner == 1) & (outer == 1)
+            inner[both_one] = 0.4
+            outer[both_one] = 0.6
+            both_zero = (inner == 0) & (outer == 0)
             inner[both_zero] = 0.5
             outer[both_zero] = 0.5
+        keys_inner_mask = set(inner_mask.keys())
+        keys_delta_in = set(delta_in.keys())
+        keys_delta_out = set(delta_out.keys())
+        keys_outer_mask = set(outer_mask.keys())
+        keys_theta_t = set(theta_t.keys())
 
+        assert keys_inner_mask == keys_delta_in == keys_delta_out == keys_outer_mask == keys_theta_t, (
+            f"Key mismatch: inner_mask keys: {keys_inner_mask}, "
+            f"delta_in keys: {keys_delta_in}, "
+            f"delta_out keys: {keys_delta_out}, "
+            f"outer_mask keys: {keys_outer_mask}, "
+            f"theta_t keys: {keys_theta_t}"
+        )
+        final_delta = {n: inner_mask[n] * delta_in[n] + outer_mask[n] * delta_out[n] for n in theta_t}
         with torch.no_grad():
-            for name, p in self._network.named_parameters():
-                updated = theta_t[name] + inner_mask[name] * delta_in[name] + outer_mask[name] * delta_out[name]
-                p.copy_(updated)
-
+            for n, p in self.model.named_parameters():
+                if n in final_delta:
+                    p.copy_(theta_t[n] + final_delta[n])
 
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler): 
         prog_bar = tqdm(range(epochs))
