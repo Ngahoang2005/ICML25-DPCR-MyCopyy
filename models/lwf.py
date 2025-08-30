@@ -392,21 +392,36 @@ class LwF(BaseLearner):
     #         for name, p in self._network.named_parameters():
     #             updated = theta_t[name] + inner_mask[name] * delta_in[name] + outer_mask[name] * delta_out[name]
     #             p.copy_(updated)
-    def update_parameters_with_task_vectors(self):
+    def update_parameters_with_task_vectors(self, theta_t, delta_in, delta_out):
         """
         Thay vì overwrite tham số = θ_t + delta,
         mình chỉ chỉnh gradient bằng IPT mask.
         """
         inner_mask = self.ipt_score.calculate_score_inner()
         outer_mask = self.ipt_score.calculate_score_outer()
+        for n in inner_mask:
+            # 遍历每个 mask 的元素
+            inner = inner_mask[n]
+            outer = outer_mask[n]
 
+            # 检查 inner 和 outer 是否具有相同的大小，确保可以逐元素操作
+            assert inner.shape == outer.shape, f"Mismatched shape for {n}: {inner.shape} vs {outer.shape}"
+
+            # 修改 mask 的值
+            # 都为 1 时，更新为 0.4 和 0.6
+            both_one = (inner == 1) & (outer == 1)
+            inner[both_one] = 0.4
+            outer[both_one] = 0.6
+
+            # 都为 0 时，更新为 0.4 和 0.6
+            both_zero = (inner == 0) & (outer == 0)
+            inner[both_zero] = 0.5
+            outer[both_zero] = 0.5
+        final_delta = {n: inner_mask[n] * delta_in[n] + outer_mask[n] * delta_out[n] for n in theta_t}
         with torch.no_grad():
-            for n, p in self._network.named_parameters():
-                if p.grad is not None:
-                    # Quan trọng (mask cao) => giảm update
-                    mask = 1.0 - 0.5 * inner_mask[n] - 0.5 * outer_mask[n]
-                    # scale gradient
-                    p.grad.mul_(mask)
+            for n, p in self.model.named_parameters():
+                if n in final_delta:
+                    p.copy_(theta_t[n] + final_delta[n])
     def _update_representation(self, train_loader, test_loader, optimizer, scheduler): 
         prog_bar = tqdm(range(epochs))
         for epoch in prog_bar:
@@ -418,6 +433,8 @@ class LwF(BaseLearner):
 
             for cycle in range(32):  # 32 chu kỳ
                 # === 4 bước INNER ===
+                theta_t = {n: p.clone().detach() for n, p in self._network.named_parameters()}
+
                 for _ in range(4):
                     try:
                         _, inputs, targets = next(data_iter)
@@ -427,25 +444,20 @@ class LwF(BaseLearner):
 
                     inputs, targets = inputs.to(self._device), targets.to(self._device)
                     student_outputs = self._network(inputs)["logits"]
-
                     fake_targets = targets - self._known_classes
                     loss_inner = F.cross_entropy(student_outputs[:, self._known_classes:], fake_targets)
 
                     optimizer.zero_grad()
                     loss_inner.backward()
                     self.ipt_score.update_ipt()   # cập nhật importance
-                    # scale gradient bằng IPT mask
-                    inner_mask = self.ipt_score.calculate_score_inner()
-                    with torch.no_grad():
-                        for n, p in self._network.named_parameters():
-                            if p.grad is not None:
-                                p.grad.mul_(1.0 - inner_mask[n])  
                     optimizer.step()
-
+    
                     losses += loss_inner.item()
                     _, preds = torch.max(student_outputs, dim=1)
                     correct += preds.eq(targets).cpu().sum().item()
                     total += targets.size(0)
+                theta_after_inner = {n: p.clone().detach() for n, p in self._network.named_parameters()}
+                delta_in = {n: theta_after_inner[n] - theta_t[n] for n in theta_t}
 
                 # === 1 bước OUTER ===
                 try:
@@ -470,15 +482,13 @@ class LwF(BaseLearner):
                 optimizer.zero_grad()
                 kd_loss.backward()
                 self.ipt_score.update_ipt()
-                # scale gradient bằng outer mask
-                outer_mask = self.ipt_score.calculate_score_outer()
-                with torch.no_grad():
-                    for n, p in self._network.named_parameters():
-                        if p.grad is not None:
-                            p.grad.mul_(1.0 - outer_mask[n])
+                
                 optimizer.step()
 
                 losses += kd_loss.item()
+                theta_after_outer = {n: p.clone().detach() for n, p in self._network.named_parameters()}
+                delta_out = {n: theta_after_outer[n] - theta_after_inner[n] for n in theta_t}
+                self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out) 
 
             # ---- epoch end ----
             scheduler.step()
