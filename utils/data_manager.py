@@ -158,7 +158,7 @@ class DataManager(object):
         order = [i for i in range(len(np.unique(self._train_targets)))]
         import time
         if shuffle:
-            np.random.seed(int.time(time()))
+            np.random.seed(int(time.time()))
             order = np.random.permutation(len(order)).tolist()
         else:
             order = idata.class_order
