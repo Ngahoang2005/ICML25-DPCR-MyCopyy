@@ -434,7 +434,6 @@ class LwF(BaseLearner):
             for cycle in range(32):  # 32 chu kỳ
                 # === 4 bước INNER ===
                 theta_t = {n: p.clone().detach() for n, p in self._network.named_parameters()}
-
                 for _ in range(4):
                     try:
                         _, inputs, targets = next(data_iter)
@@ -449,7 +448,7 @@ class LwF(BaseLearner):
 
                     optimizer.zero_grad()
                     loss_inner.backward()
-                    self.ipt_score.update_ipt()   # cập nhật importance
+                    #self.ipt_score.update_ipt()   # cập nhật importance
                     optimizer.step()
     
                     losses += loss_inner.item()
@@ -489,7 +488,7 @@ class LwF(BaseLearner):
                 theta_after_outer = {n: p.clone().detach() for n, p in self._network.named_parameters()}
                 delta_out = {n: theta_after_outer[n] - theta_after_inner[n] for n in theta_t}
                 self.update_parameters_with_task_vectors(theta_t, delta_in, delta_out) 
-
+                theta_t = {n: p.clone().detach() for n, p in self._network.named_parameters()}
             # ---- epoch end ----
             scheduler.step()
             train_acc = np.around(tensor2numpy(torch.tensor(correct)) * 100 / total, decimals=2)
