@@ -16,14 +16,14 @@ from torchvision import datasets, transforms
 from utils.autoaugment import CIFAR10Policy
 
 
-init_epoch = 20
+init_epoch = 2
 init_lr = 0.001
 init_milestones = [60, 120, 160]
 init_lr_decay = 0.1
 init_weight_decay = 0.0005
 
 # cifar100
-epochs = 20
+epochs = 2
 lrate = 0.0005
 milestones = [45, 90]
 lrate_decay = 0.1
@@ -68,65 +68,80 @@ EPSILON = 1e-8
 import torch
 from collections import defaultdict
 
+import torch
+
 class IPTScore:
-    def __init__(self, model, beta=0.9, eps=1e-8, tau=1.0):
+    def __init__(self, model, beta1=0.9, beta2=0.95, taylor="param_first"):
         self.model = model
-        self.beta = beta
-        self.eps = eps
-        self.tau = tau
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.taylor = taylor
 
-        self.exp_avg_ipt_inner = {}
-        self.exp_avg_ipt_outer = {}
+        # lưu trữ giá trị
+        self.ipt = {}
+        self.exp_avg_ipt = {}
+        self.exp_avg_unc = {}
 
-    def _update_ema(self, ema_dict, name, new_val):
-        if name not in ema_dict:
-            ema_dict[name] = new_val.detach().clone()
-        else:
-            ema_dict[name] = self.beta * ema_dict[name] + (1 - self.beta) * new_val.detach()
-
-    def update_inner(self):
-        for name, p in self.model.named_parameters():
+    def update_ipt(self, global_step):
+        for n, p in self.model.named_parameters():
             if p.grad is None:
+                # param không có grad => không quan trọng
+                self.ipt[n] = torch.zeros_like(p)
                 continue
-            # First-order Taylor approximation
-            ipt = (p * p.grad).pow(2)   # dùng w * grad, rồi lấy bình phương
-            self._update_ema(self.exp_avg_ipt_inner, name, ipt)
 
-    def update_outer(self):
-        for name, p in self.model.named_parameters():
-            if p.grad is None:
-                continue
-            ipt = (p * p.grad).pow(2)
-            self._update_ema(self.exp_avg_ipt_outer, name, ipt)
+            if n not in self.ipt:
+                self.ipt[n] = torch.zeros_like(p)
+                self.exp_avg_ipt[n] = torch.zeros_like(p)
+                self.exp_avg_unc[n] = torch.zeros_like(p)
 
-    def _calculate_score(self, ema_dict):
-        # gom tất cả scores vào 1 vector để chuẩn hóa toàn cục
-        flat_scores = []
-        for v in ema_dict.values():
-            flat_scores.append(v.view(-1))
-        if not flat_scores:
-            return {k: torch.zeros_like(v) for k, v in ema_dict.items()}
-        
-        flat_scores = torch.cat(flat_scores)
-        min_val, max_val = flat_scores.min(), flat_scores.max()
-        normed = (flat_scores - min_val) / (max_val - min_val + self.eps)
+            with torch.no_grad():
+                # --- công thức IPT ---
+                if self.taylor == "param_first":
+                    ipt_val = (p * p.grad).abs()
+                elif self.taylor == "param_second":
+                    ipt_val = (p * p.grad * p * p.grad).abs()
+                elif self.taylor == "param_mix":
+                    ipt_val = (p * p.grad - 0.5 * (p * p.grad * p * p.grad)).abs()
+                else:
+                    raise ValueError(f"Unknown IPT metric {self.taylor}")
 
-        # softmax trên toàn bộ vector
-        weights = torch.softmax(normed / self.tau, dim=0)
+                self.ipt[n] = ipt_val.detach()
 
-        # gán lại vào dict
-        score_dict, idx = {}, 0
-        for name, v in ema_dict.items():
-            numel = v.numel()
-            score_dict[name] = weights[idx: idx+numel].view_as(v)
-            idx += numel
-        return score_dict
+                # --- EMA smoothing ---
+                self.exp_avg_ipt[n] = (
+                    self.beta1 * self.exp_avg_ipt[n] + (1 - self.beta1) * self.ipt[n]
+                )
+                self.exp_avg_unc[n] = (
+                    self.beta2 * self.exp_avg_unc[n]
+                    + (1 - self.beta2) * (self.ipt[n] - self.exp_avg_ipt[n]).abs()
+                )
 
-    def calculate_score_inner(self):
-        return self._calculate_score(self.exp_avg_ipt_inner)
+    # ====== Inner score (dùng cho việc chọn tham số giữ lại) ======
+    def calculate_score_inner(self, metric="ipt"):
+        scores = {}
+        for n in self.exp_avg_ipt:
+            if metric == "ipt":
+                # inner dùng exp_avg_ipt (ổn định hơn)
+                scores[n] = self.exp_avg_ipt[n].clone().detach()
+            elif metric == "mag":
+                scores[n] = self.model.state_dict()[n].abs().detach().clone()
+            else:
+                raise ValueError(f"Unexpected inner metric {metric}")
+        return scores
 
-    def calculate_score_outer(self):
-        return self._calculate_score(self.exp_avg_ipt_outer)
+    # ====== Outer score (dùng để cập nhật rank/importance) ======
+    def calculate_score_outer(self, metric="ipt"):
+        scores = {}
+        for n in self.exp_avg_ipt:
+            if metric == "ipt":
+                # outer kết hợp cả exp_avg_ipt * exp_avg_unc
+                scores[n] = (self.exp_avg_ipt[n] * self.exp_avg_unc[n]).clone().detach()
+            elif metric == "mag":
+                scores[n] = self.model.state_dict()[n].abs().detach().clone()
+            else:
+                raise ValueError(f"Unexpected outer metric {metric}")
+        return scores
+
 
 class LwF(BaseLearner):
     def __init__(self, args):
