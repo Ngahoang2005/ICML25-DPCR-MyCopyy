@@ -107,31 +107,33 @@ class IPTScore:
                 self.exp_avg_unc[n] = self.beta2 * self.exp_avg_unc[n] + (1 - self.beta2) * (self.ipt[n] - self.exp_avg_ipt[n]).abs()
 
     def _normalize(self, x):
-        # normalize to [0,1]
         minv, maxv = x.min(), x.max()
         if (maxv - minv) < 1e-12:
             return torch.zeros_like(x)
         return (x - minv) / (maxv - minv + self.eps)
 
     def calculate_score_inner(self, ratio=0.4):
-        all_scores = torch.cat([v.view(-1) for v in self.scores.values()])
-        k = int(ratio * all_scores.numel())   # lấy 40% tham số
+        # dùng exp_avg_ipt
+        scores = self.exp_avg_ipt
+        all_scores = torch.cat([v.view(-1) for v in scores.values()])
+        k = int(ratio * all_scores.numel())   # lấy top ratio%
         if k < 1:
             k = 1
         threshold = torch.topk(all_scores, k)[0][-1]
-
-        mask = {n: (v >= threshold).float() for n, v in self.scores.items()}
+        mask = {n: (v >= threshold).float() for n, v in scores.items()}
         return mask
 
     def calculate_score_outer(self, ratio=0.4):
-        all_scores = torch.cat([v.view(-1) for v in self.scores.values()])
-        k = int(ratio * all_scores.numel())   # lấy 40% tham số
+        # dùng exp_avg_unc
+        scores = self.exp_avg_ipt
+        all_scores = torch.cat([v.view(-1) for v in scores.values()])
+        k = int(ratio * all_scores.numel())
         if k < 1:
             k = 1
         threshold = torch.topk(all_scores, k)[0][-1]
-
-        mask = {n: (v >= threshold).float() for n, v in self.scores.items()}
+        mask = {n: (v >= threshold).float() for n, v in scores.items()}
         return mask
+
 
 
 class LwF(BaseLearner):
