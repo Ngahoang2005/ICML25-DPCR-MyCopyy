@@ -83,7 +83,7 @@ class IPTScore:
         self.exp_avg_unc = {}
 
     def update_ipt(self, global_step):
-        for n, p in self.model.named_parameters():
+        for n, p in self._network.named_parameters():
             if p.grad is None:
                 continue
             grad2 = p.grad.data.pow(2)
