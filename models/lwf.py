@@ -71,8 +71,8 @@ from collections import defaultdict
 import torch
 
 class IPTScore:
-    def __init__(self, model, beta1=0.9, beta2=0.95, taylor="param_first"):
-        self.model = model
+    def __init__(self, _network, beta1=0.9, beta2=0.95, taylor="param_first"):
+        self._network = _network    
         self.beta1 = beta1
         self.beta2 = beta2
         self.taylor = taylor
@@ -83,7 +83,7 @@ class IPTScore:
         self.exp_avg_unc = {}
 
     def update_ipt(self, global_step):
-        for n, p in self.model.named_parameters():
+        for n, p in self._network.named_parameters():
             if p.grad is None:
                 # param không có grad => không quan trọng
                 self.ipt[n] = torch.zeros_like(p)
@@ -124,7 +124,7 @@ class IPTScore:
                 # inner dùng exp_avg_ipt (ổn định hơn)
                 scores[n] = self.exp_avg_ipt[n].clone().detach()
             elif metric == "mag":
-                scores[n] = self.model.state_dict()[n].abs().detach().clone()
+                scores[n] = self._network.state_dict()[n].abs().detach().clone()
             else:
                 raise ValueError(f"Unexpected inner metric {metric}")
         return scores
@@ -137,7 +137,7 @@ class IPTScore:
                 # outer kết hợp cả exp_avg_ipt * exp_avg_unc
                 scores[n] = (self.exp_avg_ipt[n] * self.exp_avg_unc[n]).clone().detach()
             elif metric == "mag":
-                scores[n] = self.model.state_dict()[n].abs().detach().clone()
+                scores[n] = self._network.state_dict()[n].abs().detach().clone()
             else:
                 raise ValueError(f"Unexpected outer metric {metric}")
         return scores
@@ -436,7 +436,7 @@ class LwF(BaseLearner):
         )
         final_delta = {n: inner_mask[n] * delta_in[n] + outer_mask[n] * delta_out[n] for n in theta_t}
         with torch.no_grad():
-            for n, p in self.model.named_parameters():
+            for n, p in self._network.named_parameters():
                 if n in final_delta:
                     p.copy_(theta_t[n] + final_delta[n])
 
@@ -470,6 +470,8 @@ class LwF(BaseLearner):
                     optimizer.zero_grad()
                     loss_inner.backward(retain_graph=True)
                     optimizer.step()
+
+                    self.ipt_score.update_ipt(global_step=batch_idx)
 
                     # delta_in
                     delta_in = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
@@ -505,7 +507,7 @@ class LwF(BaseLearner):
                     optimizer.zero_grad()
                     kd_loss.backward()
                     optimizer.step()
-
+                    self.ipt_score.update_ipt(global_step=batch_idx)
                     # delta_out
                     delta_out = {name: (p.detach() - theta_t[name]) for name, p in self._network.named_parameters()}
 
