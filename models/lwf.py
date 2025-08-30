@@ -71,58 +71,95 @@ from collections import defaultdict
 import torch
 
 class IPTScore:
-    def __init__(self, _network, beta1=0.9, beta2=0.95, taylor="param_first"):
-        self._network = _network    
+    def __init__(self, model, beta1=0.9, beta2=0.95, taylor="param_first", eps=1e-8):
+        self.model = model
         self.beta1 = beta1
         self.beta2 = beta2
         self.taylor = taylor
+        self.eps = eps
 
-        # lưu trữ giá trị
+        # dicts mapping param_name -> tensor same shape as param
         self.ipt = {}
         self.exp_avg_ipt = {}
         self.exp_avg_unc = {}
 
-    def update_ipt(self, global_step):
-        for n, p in self._network.named_parameters():
+    def _ensure_entry(self, name, template_tensor):
+        """Ensure all three dicts have an entry with the same shape/device/dtype."""
+        # if existing but shape mismatch -> reinit to zeros_like(template_tensor)
+        for d in (self.ipt, self.exp_avg_ipt, self.exp_avg_unc):
+            if name not in d or d[name].shape != template_tensor.shape:
+                # create on same device/dtype as template_tensor
+                d[name] = torch.zeros_like(template_tensor)
+
+    def update_ipt(self, global_step=None):
+        """
+        Call this after backward (when p.grad exists for updated params).
+        Robustly handles params with grad==None by setting ipt=0 and ensuring
+        exp_avg entries exist with correct shape/device.
+        """
+        for n, p in self.model.named_parameters():
+            # ensure entries exist (create zeros with correct shape/device)
+            self._ensure_entry(n, p)
+
             if p.grad is None:
-                continue
-            grad2 = p.grad.data.pow(2)
-            if n not in self.ipt:
-                self.ipt[n] = grad2.clone()
+                # param has no grad at this step -> ipt = 0 (keep EMA running)
+                # We set ipt[n] to zeros_like(p) (device/dtype matched in _ensure_entry)
+                self.ipt[n].zero_()
             else:
-                self.ipt[n] = self.beta2 * self.ipt[n] + (1 - self.beta2) * grad2
+                with torch.no_grad():
+                    # compute ipt according to taylor option
+                    if self.taylor == "param_first":
+                        ipt_val = (p * p.grad).abs()
+                    elif self.taylor == "param_second":
+                        ipt_val = (p * p.grad * p * p.grad).abs()
+                    elif self.taylor == "param_mix":
+                        ipt_val = (p * p.grad - 0.5 * (p * p.grad * p * p.grad)).abs()
+                    else:
+                        raise ValueError(f"Unknown IPT metric {self.taylor}")
 
-            # === FIX: ensure shape match ===
-            if n not in self.exp_avg_ipt or self.exp_avg_ipt[n].shape != self.ipt[n].shape:
-                self.exp_avg_ipt[n] = torch.zeros_like(self.ipt[n], device=p.device)
+                    # detach and copy into ipt dict (preserve device/dtype)
+                    self.ipt[n].copy_(ipt_val.detach())
 
-            self.exp_avg_ipt[n] = (
-                self.beta1 * self.exp_avg_ipt[n] + (1 - self.beta1) * self.ipt[n]
-            )
+            # --- now update EMA safely ---
+            # If shapes changed earlier, _ensure_entry ensures exp_avg_* exist and match shape
+            with torch.no_grad():
+                self.exp_avg_ipt[n] = self.beta1 * self.exp_avg_ipt[n] + (1 - self.beta1) * self.ipt[n]
+                self.exp_avg_unc[n] = self.beta2 * self.exp_avg_unc[n] + (1 - self.beta2) * (self.ipt[n] - self.exp_avg_ipt[n]).abs()
 
-
-    # ====== Inner score (dùng cho việc chọn tham số giữ lại) ======
     def calculate_score_inner(self, metric="ipt"):
+        """
+        Return dict {name: tensor} for inner mask calculation.
+        Default uses exp_avg_ipt. For params not present return zeros_like param.
+        """
         scores = {}
-        for n in self.exp_avg_ipt:
-            if metric == "ipt":
-                # inner dùng exp_avg_ipt (ổn định hơn)
-                scores[n] = self.exp_avg_ipt[n].clone().detach()
-            elif metric == "mag":
-                scores[n] = self._network.state_dict()[n].abs().detach().clone()
+        for n, p in self.model.named_parameters():
+            # make sure we have shape-correct entries
+            if n not in self.exp_avg_ipt:
+                # no history -> zeros
+                scores[n] = torch.zeros_like(p)
             else:
-                raise ValueError(f"Unexpected inner metric {metric}")
+                if metric == "ipt":
+                    scores[n] = self.exp_avg_ipt[n].clone().detach()
+                elif metric == "mag":
+                    scores[n] = p.abs().detach().clone()
+                else:
+                    raise ValueError(f"Unexpected inner metric {metric}")
         return scores
 
-    # ====== Outer score (dùng để cập nhật rank/importance) ======
     def calculate_score_outer(self, metric="ipt"):
+        """
+        Return dict {name: tensor} for outer mask/rank update.
+        Default uses exp_avg_ipt * exp_avg_unc.
+        """
         scores = {}
-        for n in self.exp_avg_ipt:
+        for n, p in self.model.named_parameters():
+            # if missing entries treat as zeros
+            e_ipt = self.exp_avg_ipt.get(n, torch.zeros_like(p))
+            e_unc = self.exp_avg_unc.get(n, torch.zeros_like(p))
             if metric == "ipt":
-                # outer kết hợp cả exp_avg_ipt * exp_avg_unc
-                scores[n] = (self.exp_avg_ipt[n] * self.exp_avg_unc[n]).clone().detach()
+                scores[n] = (e_ipt * e_unc).clone().detach()
             elif metric == "mag":
-                scores[n] = self._network.state_dict()[n].abs().detach().clone()
+                scores[n] = p.abs().detach().clone()
             else:
                 raise ValueError(f"Unexpected outer metric {metric}")
         return scores
